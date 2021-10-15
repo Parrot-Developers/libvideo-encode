@@ -1,0 +1,29 @@
+    config VENC_HISI
+        bool "venc hisi implementation"
+            default false
+        help
+            Enable the HiSilicon implementation in libvideo-encode.
+
+    config VENC_X264
+        bool "venc x264 implementation"
+            default false
+        help
+            Enable the x264 implementation in libvideo-encode.
+
+    config VENC_FAKEH264
+        bool "venc fakeh264 implementation"
+            default false
+        help
+            Enable the fake H.264 implementation in libvideo-encode.
+
+    config VENC_MEDIACODEC
+        bool "venc mediacodec implementation"
+            default false
+        help
+            Enable the MediaCodec implementation in libvideo-encode.
+
+    config VENC_VIDEOTOOLBOX
+        bool "venc videotoolbox implementation"
+            default false
+        help
+            Enable the VideoToolBox implementation in libvideo-encode.

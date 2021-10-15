@@ -1,0 +1,160 @@
+
+LOCAL_PATH := $(call my-dir)
+
+include $(CLEAR_VARS)
+
+# API library. This is the library that most programs should use.
+LOCAL_MODULE := libvideo-encode
+LOCAL_CATEGORY_PATH := libs
+LOCAL_DESCRIPTION := Video encoding library
+LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/include
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_SRC_FILES := \
+	src/venc.c
+LOCAL_LIBRARIES := \
+	libpomp \
+	libulog \
+	libvideo-defs \
+	libvideo-encode-core
+LOCAL_CONFIG_FILES := config.in
+$(call load-config)
+LOCAL_CONDITIONAL_LIBRARIES := \
+	CONFIG_VENC_FAKEH264:libvideo-encode-fakeh264 \
+	CONFIG_VENC_HISI:libvideo-encode-hisi \
+	CONFIG_VENC_MEDIACODEC:libvideo-encode-mediacodec \
+	CONFIG_VENC_VIDEOTOOLBOX:libvideo-encode-videotoolbox \
+	CONFIG_VENC_X264:libvideo-encode-x264
+LOCAL_EXPORT_LDLIBS := -lvideo-encode-core
+
+include $(BUILD_LIBRARY)
+
+include $(CLEAR_VARS)
+
+# Core library, common code for all implementations and structures definitions.
+# Used by implementations.
+LOCAL_MODULE := libvideo-encode-core
+LOCAL_CATEGORY_PATH := libs
+LOCAL_DESCRIPTION := Video encoding library: core files
+LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/core/include
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_SRC_FILES := \
+	core/src/venc_core.c \
+	core/src/venc_h264.c \
+	core/src/venc_h265.c
+LOCAL_LIBRARIES := \
+	libfutils \
+	libh264 \
+	libh265 \
+	libmedia-buffers \
+	libmedia-buffers-memory \
+	libmedia-buffers-memory-generic \
+	libpomp \
+	libulog \
+	libvideo-defs \
+	libvideo-metadata \
+	libvideo-streaming
+
+include $(BUILD_LIBRARY)
+
+ifeq ("${TARGET_OS}", "darwin")
+include $(CLEAR_VARS)
+
+LOCAL_MODULE := libvideo-encode-videotoolbox
+LOCAL_CATEGORY_PATH := libs
+LOCAL_DESCRIPTION := Video encoding library: Videotoolbox implementation
+LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/videotoolbox/include
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu11
+LOCAL_SRC_FILES := \
+	videotoolbox/src/venc_videotoolbox.c
+LOCAL_LIBRARIES := \
+	libfutils \
+	libpomp \
+	libulog \
+	libmedia-buffers \
+	libmedia-buffers-memory \
+	libmedia-buffers-memory-generic \
+	libvideo-defs \
+	libvideo-encode-core
+LOCAL_LDLIBS += \
+	-framework Foundation \
+	-framework CoreMedia \
+	-framework CoreVideo \
+	-framework VideoToolbox
+
+include $(BUILD_LIBRARY)
+endif
+
+ifeq ("$(TARGET_OS)-$(TARGET_OS_FLAVOUR)","linux-android")
+include $(CLEAR_VARS)
+
+LOCAL_MODULE := libvideo-encode-mediacodec
+LOCAL_CATEGORY_PATH := libs
+LOCAL_DESCRIPTION := Video encoding library: MediaCodec implementation
+LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/mediacodec/include
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu11
+LOCAL_LDLIBS := -lmediandk
+LOCAL_SRC_FILES := \
+	mediacodec/src/venc_mediacodec.c
+LOCAL_LIBRARIES := \
+	libfutils \
+	libpomp \
+	libulog \
+	libmedia-buffers \
+	libmedia-buffers-memory \
+	libmedia-buffers-memory-generic \
+	libvideo-defs \
+	libvideo-encode-core \
+	libvideo-metadata
+
+
+include $(BUILD_LIBRARY)
+
+endif
+
+include $(CLEAR_VARS)
+
+# x264 implementation. can be enabled in the product configuration.
+LOCAL_MODULE := libvideo-encode-x264
+LOCAL_CATEGORY_PATH := libs
+LOCAL_DESCRIPTION := Video encoding library: x264 implementation
+LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/x264/include
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_SRC_FILES := \
+	x264/src/venc_x264.c
+LOCAL_LIBRARIES := \
+	libfutils \
+	libh264 \
+	libpomp \
+	libulog \
+	libmedia-buffers \
+	libmedia-buffers-memory \
+	libmedia-buffers-memory-generic \
+	libvideo-defs \
+	libvideo-encode-core \
+	libvideo-metadata \
+	libvideo-streaming \
+	x264
+
+include $(BUILD_LIBRARY)
+
+
+include $(CLEAR_VARS)
+
+LOCAL_MODULE := venc
+LOCAL_DESCRIPTION := Video encoding program
+LOCAL_CATEGORY_PATH := multimedia
+LOCAL_SRC_FILES := tools/venc.c
+LOCAL_LIBRARIES := \
+	libfutils \
+	libh264 \
+	libh265 \
+	libpomp \
+	libulog \
+	libmedia-buffers \
+	libmedia-buffers-memory \
+	libmedia-buffers-memory-generic \
+	libvideo-defs \
+	libvideo-encode \
+	libvideo-raw
+
+include $(BUILD_EXECUTABLE)
