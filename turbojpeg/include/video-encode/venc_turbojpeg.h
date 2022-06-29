@@ -24,73 +24,33 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _VENC_PRIV_H_
-#define _VENC_PRIV_H_
+#ifndef _VENC_TURBOJPEG_H_
+#define _VENC_TURBOJPEG_H_
 
-#define _GNU_SOURCE
-#include <errno.h>
-#include <inttypes.h>
-#include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <stdint.h>
 
-#include <futils/futils.h>
-#include <h264/h264.h>
-#include <video-encode/venc.h>
-#include <video-encode/venc_h264.h>
-#include <video-encode/venc_h265.h>
-#include <video-encode/venc_internal.h>
-#include <video-streaming/vstrm.h>
+#include <video-encode/venc_core.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif /* __cplusplus */
 
-#define VENC_H264_MAIN_PROFILE 77
-#define VENC_H264_LEVEL_4_0 40
-#define VENC_DEFAULT_GOP_LENGTH_SEC 1.f
+/* To be used for all public API */
+#ifdef VENC_API_EXPORTS
+#	ifdef _WIN32
+#		define VENC_API __declspec(dllexport)
+#	else /* !_WIN32 */
+#		define VENC_API __attribute__((visibility("default")))
+#	endif /* !_WIN32 */
+#else /* !VENC_API_EXPORTS */
+#	define VENC_API
+#endif /* !VENC_API_EXPORTS */
 
-#define VENC_H265_MAIN_PROFILE 1
-#define VENC_H265_LEVEL_4_0 40
+extern VENC_API const struct venc_ops venc_turbojpeg_ops;
 
-#ifdef BUILD_LIBVIDEO_ENCODE_X264
-#	include <video-encode/venc_x264.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_HISI
-#	include <video-encode/venc_hisi.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_QCOM
-#	include <video-encode/venc_qcom.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_MEDIACODEC
-#	include <video-encode/venc_mediacodec.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_FAKEH264
-#	include <video-encode/venc_fakeh264.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_VIDEOTOOLBOX
-#	include <video-encode/venc_videotoolbox.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_TURBOJPEG
-#	include <video-encode/venc_turbojpeg.h>
-#endif
-
-static inline void xfree(void **ptr)
-{
-	if (ptr) {
-		free(*ptr);
-		*ptr = NULL;
-	}
+#ifdef __cplusplus
 }
+#endif /* __cplusplus */
 
 
-static inline char *xstrdup(const char *s)
-{
-	return s == NULL ? NULL : strdup(s);
-}
-
-
-#endif /* !_VENC_PRIV_H_ */
+#endif /* !_VENC_TURBOJPEG_H_ */

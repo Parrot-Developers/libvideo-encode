@@ -93,6 +93,15 @@ VENC_API enum venc_encoder_implem venc_get_auto_implem(void);
 
 
 /**
+ * Get the implementation that supports the required encodings.
+ * @param encoding: encoding to support
+ * @return the encoder implementation, or VENC_ENCODER_IMPLEM_AUTO in
+ * case of error
+ */
+VENC_API enum venc_encoder_implem
+venc_get_auto_implem_by_encoding(enum vdef_encoding encoding);
+
+/**
  * Create an encoder instance.
  * The configuration and callbacks structures must be filled.
  * The instance handle is returned through the venc parameter.
@@ -269,6 +278,36 @@ VENC_API int venc_get_dyn_config(struct venc_encoder *self,
  */
 VENC_API int venc_set_dyn_config(struct venc_encoder *self,
 				 const struct venc_dyn_config *config);
+
+
+/**
+ * Get the input buffer constraints.
+ * The caller must provide a constraints structure to fill.
+ * @param implem: encoder implementation
+ * @param format: pointer to an input format
+ * @param constraints: pointer to a venc_input_buffer_constraints
+ * structure (output)
+ * @return 0 on success, negative errno value in case of error
+ */
+VENC_API int venc_get_input_buffer_constraints(
+	enum venc_encoder_implem implem,
+	const struct vdef_raw_format *format,
+	struct venc_input_buffer_constraints *constraints);
+
+
+/**
+ * Request an IDR frame.
+ * This function requests encoding an IDR frame as soon as possible.
+ * If frames have already been submitted through the input queue, there is
+ * no guarantee that the next frame to be output will be an IDR frame.
+ * Inserting IDR frames only makes sense for H.264 and H.265 encodings;
+ * for other encoding types the function returns -EINVAL. Also not all
+ * implementations support inserting IDR frames on-demand, therefore the
+ * requirement may never be met; in that case the function returns -ENOSYS.
+ * @param self: encoder instance handle
+ * @return 0 on success, negative errno value in case of error
+ */
+VENC_API int venc_request_idr(struct venc_encoder *self);
 
 
 #ifdef __cplusplus

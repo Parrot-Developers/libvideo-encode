@@ -28,7 +28,6 @@
 #define _VENC_INTERNAL_H_
 
 #define _GNU_SOURCE
-#include <arpa/inet.h>
 #include <h264/h264.h>
 #include <inttypes.h>
 #include <video-streaming/vstrm.h>
@@ -161,6 +160,32 @@ struct venc_ops {
 	 */
 	int (*set_dyn_config)(struct venc_encoder *base,
 			      const struct venc_dyn_config *config);
+
+	/**
+	 * Get the input buffer constraints (optional).
+	 * The caller must provide a constraints structure to fill.
+	 * If the implementation does not have any input buffers constraints,
+	 * the pointer can be NULL.
+	 * @param format: input format used within the encoder
+	 * @param constraints: pointer to a venc_input_buffer_constraints
+	 * structure (output)
+	 * @return 0 on success, negative errno value in case of error
+	 */
+	int (*get_input_buffer_constraints)(
+		const struct vdef_raw_format *format,
+		struct venc_input_buffer_constraints *constraints);
+
+	/**
+	 * Request an IDR frame (optional).
+	 * This function requests encoding an IDR frame as soon as possible.
+	 * If frames have already been submitted through the input queue,
+	 * there is no guarantee that the next frame to be output will be
+	 * an IDR frame. If the implementation does not support inserting
+	 * IDR frames on-demand, the pointer should be NULL.
+	 * @param base: base instance
+	 * @return 0 on success, negative errno value in case of error
+	 */
+	int (*request_idr)(struct venc_encoder *base);
 };
 
 struct venc_encoder {

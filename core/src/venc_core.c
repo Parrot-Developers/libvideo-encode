@@ -38,10 +38,14 @@ enum venc_encoder_implem venc_encoder_implem_from_str(const char *str)
 		return VENC_ENCODER_IMPLEM_X264;
 	else if (strcasecmp(str, "HISI") == 0)
 		return VENC_ENCODER_IMPLEM_HISI;
+	else if (strcasecmp(str, "QCOM") == 0)
+		return VENC_ENCODER_IMPLEM_QCOM;
 	else if (strcasecmp(str, "FAKEH264") == 0)
 		return VENC_ENCODER_IMPLEM_FAKEH264;
 	else if (strcasecmp(str, "VIDEOTOOLBOX") == 0)
 		return VENC_ENCODER_IMPLEM_VIDEOTOOLBOX;
+	else if (strcasecmp(str, "TURBOJPEG") == 0)
+		return VENC_ENCODER_IMPLEM_TURBOJPEG;
 	else
 		return VENC_ENCODER_IMPLEM_AUTO;
 }
@@ -54,10 +58,14 @@ const char *venc_encoder_implem_to_str(enum venc_encoder_implem implem)
 		return "X264";
 	case VENC_ENCODER_IMPLEM_HISI:
 		return "HISI";
+	case VENC_ENCODER_IMPLEM_QCOM:
+		return "QCOM";
 	case VENC_ENCODER_IMPLEM_FAKEH264:
 		return "FAKEH264";
 	case VENC_ENCODER_IMPLEM_VIDEOTOOLBOX:
 		return "VIDEOTOOLBOX";
+	case VENC_ENCODER_IMPLEM_TURBOJPEG:
+		return "TURBOJPEG";
 	case VENC_ENCODER_IMPLEM_AUTO:
 	default:
 		return "UNKNOWN";

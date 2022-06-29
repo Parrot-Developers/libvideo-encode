@@ -4,6 +4,12 @@
         help
             Enable the HiSilicon implementation in libvideo-encode.
 
+    config VENC_QCOM
+        bool "venc qcom implementation"
+            default false
+        help
+            Enable the Qualcomm implementation in libvideo-encode.
+
     config VENC_X264
         bool "venc x264 implementation"
             default false
@@ -27,3 +33,9 @@
             default false
         help
             Enable the VideoToolBox implementation in libvideo-encode.
+
+    config VENC_TURBOJPEG
+        bool "venc turbojpeg implementation"
+            default false
+        help
+            Enable the turbojpeg implementation in libvideo-encode.

@@ -38,6 +38,10 @@ static const struct venc_ops *implem_ops(enum venc_encoder_implem implem)
 	case VENC_ENCODER_IMPLEM_HISI:
 		return &venc_hisi_ops;
 #endif
+#ifdef BUILD_LIBVIDEO_ENCODE_QCOM
+	case VENC_ENCODER_IMPLEM_QCOM:
+		return &venc_qcom_ops;
+#endif
 #ifdef BUILD_LIBVIDEO_ENCODE_MEDIACODEC
 	case VENC_ENCODER_IMPLEM_MEDIACODEC:
 		return &venc_mediacodec_ops;
@@ -49,6 +53,10 @@ static const struct venc_ops *implem_ops(enum venc_encoder_implem implem)
 #ifdef BUILD_LIBVIDEO_ENCODE_X264
 	case VENC_ENCODER_IMPLEM_X264:
 		return &venc_x264_ops;
+#endif
+#ifdef BUILD_LIBVIDEO_ENCODE_TURBOJPEG
+	case VENC_ENCODER_IMPLEM_TURBOJPEG:
+		return &venc_turbojpeg_ops;
 #endif
 #ifdef BUILD_LIBVIDEO_ENCODE_FAKEH264
 	case VENC_ENCODER_IMPLEM_FAKEH264:
@@ -70,6 +78,14 @@ static int venc_get_implem(enum venc_encoder_implem *implem)
 	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
 	    (*implem == VENC_ENCODER_IMPLEM_HISI)) {
 		*implem = VENC_ENCODER_IMPLEM_HISI;
+		return 0;
+	}
+#endif
+
+#ifdef BUILD_LIBVIDEO_ENCODE_QCOM
+	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
+	    (*implem == VENC_ENCODER_IMPLEM_QCOM)) {
+		*implem = VENC_ENCODER_IMPLEM_QCOM;
 		return 0;
 	}
 #endif
@@ -102,6 +118,14 @@ static int venc_get_implem(enum venc_encoder_implem *implem)
 	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
 	    (*implem == VENC_ENCODER_IMPLEM_FAKEH264)) {
 		*implem = VENC_ENCODER_IMPLEM_FAKEH264;
+		return 0;
+	}
+#endif
+
+#ifdef BUILD_LIBVIDEO_ENCODE_TURBOJPEG
+	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
+	    (*implem == VENC_ENCODER_IMPLEM_TURBOJPEG)) {
+		*implem = VENC_ENCODER_IMPLEM_TURBOJPEG;
 		return 0;
 	}
 #endif
@@ -148,6 +172,36 @@ enum venc_encoder_implem venc_get_auto_implem(void)
 	ULOG_ERRNO_RETURN_VAL_IF(ret < 0, -ret, VENC_ENCODER_IMPLEM_AUTO);
 
 	return implem;
+}
+
+
+enum venc_encoder_implem
+venc_get_auto_implem_by_encoding(enum vdef_encoding encoding)
+{
+	int res = 0;
+	const enum vdef_encoding *encodings;
+
+	ULOG_ERRNO_RETURN_ERR_IF(!encoding, EINVAL);
+
+	for (enum venc_encoder_implem implem = VENC_ENCODER_IMPLEM_AUTO + 1;
+	     implem < VENC_ENCODER_IMPLEM_MAX;
+	     implem++) {
+
+		res = venc_get_implem(&implem);
+		if (res < 0)
+			continue;
+
+		res = implem_ops(implem)->get_supported_encodings(&encodings);
+		if (res < 0)
+			continue;
+
+		for (int i = 0; i < res; i++) {
+			if (encodings[i] == encoding)
+				return implem;
+		}
+	}
+
+	return VENC_ENCODER_IMPLEM_AUTO;
 }
 
 
@@ -566,10 +620,61 @@ int venc_set_dyn_config(struct venc_encoder *self,
 }
 
 
+int venc_get_input_buffer_constraints(
+	enum venc_encoder_implem implem,
+	const struct vdef_raw_format *format,
+	struct venc_input_buffer_constraints *constraints)
+{
+	int ret;
+	unsigned int nb_planes;
+
+	ULOG_ERRNO_RETURN_ERR_IF(format == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(constraints == NULL, EINVAL);
+
+	ret = venc_get_implem(&implem);
+	ULOG_ERRNO_RETURN_VAL_IF(ret < 0, -ret, 0);
+
+	if (implem_ops(implem)->get_input_buffer_constraints != NULL) {
+		return implem_ops(implem)->get_input_buffer_constraints(
+			format, constraints);
+	} else {
+		nb_planes = vdef_get_raw_frame_plane_count(format);
+		memset(constraints->plane_stride_align,
+		       0,
+		       nb_planes * sizeof(*constraints->plane_stride_align));
+		memset(constraints->plane_scanline_align,
+		       0,
+		       nb_planes * sizeof(*constraints->plane_scanline_align));
+		memset(constraints->plane_size_align,
+		       0,
+		       nb_planes * sizeof(*constraints->plane_size_align));
+	}
+
+	return 0;
+}
+
+
 enum venc_encoder_implem venc_get_used_implem(struct venc_encoder *self)
 {
 	ULOG_ERRNO_RETURN_VAL_IF(
 		self == NULL, EINVAL, VENC_ENCODER_IMPLEM_AUTO);
 
 	return self->config.implem;
+}
+
+
+VENC_API int venc_request_idr(struct venc_encoder *self)
+{
+	int ret = -ENOSYS;
+
+	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(
+		(self->config.encoding != VDEF_ENCODING_H264) &&
+			(self->config.encoding != VDEF_ENCODING_H265),
+		EINVAL);
+
+	if (self->ops->request_idr)
+		ret = self->ops->request_idr(self);
+
+	return ret;
 }

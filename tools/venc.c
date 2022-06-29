@@ -30,7 +30,6 @@
 #	endif /* _FILE_OFFSET_BITS */
 #endif /* ANDROID */
 
-#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
@@ -39,8 +38,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 #include <unistd.h>
+
+#ifdef _WIN32
+#	include <winsock2.h>
+#else /* !_WIN32 */
+#	include <arpa/inet.h>
+#endif /* !_WIN32 */
 
 #include <futils/futils.h>
 #include <libpomp.h>
@@ -136,6 +140,7 @@ static int encode_frame(struct venc_prog *self)
 	struct vraw_frame vframe;
 	struct mbuf_mem *in_mem;
 	struct vdef_raw_frame frame_info;
+	unsigned int plane_count;
 
 	res = mbuf_pool_get(self->input.pool, &in_mem);
 	if (res == -EAGAIN) {
@@ -199,6 +204,8 @@ static int encode_frame(struct venc_prog *self)
 		return res;
 	}
 
+	plane_count = vdef_get_raw_frame_plane_count(&self->input.format);
+
 	switch (self->config.implem) {
 	case VENC_ENCODER_IMPLEM_FAKEH264:
 		res = mbuf_raw_video_frame_set_plane(in_frame, 0, in_mem, 0, 0);
@@ -206,15 +213,23 @@ static int encode_frame(struct venc_prog *self)
 			ULOG_ERRNO("mbuf_raw_video_frame_set_plane[0]", -res);
 			goto out;
 		}
-		res = mbuf_raw_video_frame_set_plane(in_frame, 1, in_mem, 0, 0);
-		if (res < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_set_plane[0]", -res);
-			goto out;
+		if (plane_count >= 2) {
+			res = mbuf_raw_video_frame_set_plane(
+				in_frame, 1, in_mem, 0, 0);
+			if (res < 0) {
+				ULOG_ERRNO("mbuf_raw_video_frame_set_plane[0]",
+					   -res);
+				goto out;
+			}
 		}
-		res = mbuf_raw_video_frame_set_plane(in_frame, 2, in_mem, 0, 0);
-		if (res < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_set_plane[0]", -res);
-			goto out;
+		if (plane_count >= 3) {
+			res = mbuf_raw_video_frame_set_plane(
+				in_frame, 2, in_mem, 0, 0);
+			if (res < 0) {
+				ULOG_ERRNO("mbuf_raw_video_frame_set_plane[0]",
+					   -res);
+				goto out;
+			}
 		}
 		break;
 	default:
@@ -230,20 +245,22 @@ static int encode_frame(struct venc_prog *self)
 			ULOG_ERRNO("mbuf_raw_video_frame_set_plane[0]", -res);
 			goto out;
 		}
-		plane_offset = vframe.data[1] - in_data;
-		res = mbuf_raw_video_frame_set_plane(
-			in_frame,
-			1,
-			in_mem,
-			plane_offset,
-			self->input.frame_info.plane_stride[1] *
-				self->input.info.resolution.height / 2);
-		if (res < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_set_plane[1]", -res);
-			goto out;
+		if (plane_count >= 2) {
+			plane_offset = vframe.data[1] - in_data;
+			res = mbuf_raw_video_frame_set_plane(
+				in_frame,
+				1,
+				in_mem,
+				plane_offset,
+				self->input.frame_info.plane_stride[1] *
+					self->input.info.resolution.height / 2);
+			if (res < 0) {
+				ULOG_ERRNO("mbuf_raw_video_frame_set_plane[1]",
+					   -res);
+				goto out;
+			}
 		}
-		if (self->input.format.data_layout ==
-		    VDEF_RAW_DATA_LAYOUT_PLANAR) {
+		if (plane_count >= 3) {
 			plane_offset = vframe.data[2] - in_data;
 			res = mbuf_raw_video_frame_set_plane(
 				in_frame,
@@ -422,11 +439,13 @@ static int frame_output(struct venc_prog *self,
 	      (float)(output_time - dequeue_time) / 1000.,
 	      (float)(output_time - input_time) / 1000.);
 
-	/* Write to file */
-	if ((self->output.file != NULL) &&
-	    (out_info.format.data_format ==
-	     VDEF_CODED_DATA_FORMAT_BYTE_STREAM)) {
+	if (self->output.file == NULL)
+		return 0;
 
+	/* Write to file */
+	switch (out_info.format.data_format) {
+	case VDEF_CODED_DATA_FORMAT_BYTE_STREAM:
+	case VDEF_CODED_DATA_FORMAT_JFIF:
 		for (i = 0; i < nalu_count; i++) {
 			res = mbuf_coded_video_frame_get_nalu(
 				out_frame, i, &nalu_data, &nalu);
@@ -467,6 +486,9 @@ static int frame_output(struct venc_prog *self,
 				return res;
 			}
 		}
+		break;
+	default:
+		break;
 	}
 
 	return 0;
@@ -645,8 +667,8 @@ static void usage(char *prog_name)
 	       "  -i | --infile <file_name>            "
 		       "YUV input file (*.y4m or *.yuv)\n"
 	       "  -f | --format <format>               "
-		       "Input file data format (e.g. \"I420\", \"YV12\", "
-		       "\"NV12\" or \"NV21\")\n"
+		       "Input file data format (e.g. \"I420\", \"NV12\", "
+		       "\"NV21\"...)\n"
 	       "  -W | --width <width>                 "
 		       "Input width in pixel units "
 		       "(unused if input is *.y4m)\n"
@@ -672,9 +694,11 @@ static void usage(char *prog_name)
 		       "encoder at the input framerate\n"
 	       "  -o | --outfile <file_name>           "
 		       "H.264/H.265 Annex B byte stream output file "
-		       "(.264/.h264/.265/.h265)\n"
+		       "(.264/.h264/.265/.h265) or JPEG/MJPEG file "
+		       "(.jpg/.jpeg/.mjpg/.mjpeg)\n"
 	       "  -e | --encoding <enc>                "
-		       "Output encoding (e.g. \"H264\" or \"H265\")\n"
+		       "Output encoding (e.g. \"H264\", \"H265\", "
+		       "\"JPEG\", \"MJPEG\"...)\n"
 	       "  -r | --rc <val>                      "
 		       "Rate control algorithm (e.g. \"CBR\", \"VBR\" "
 		       "or \"CQ\"; default is \"CBR\")\n"
@@ -734,6 +758,7 @@ int main(int argc, char **argv)
 	struct venc_prog *self;
 	char *input = NULL, *output = NULL;
 	struct vraw_reader_config reader_config;
+	struct venc_input_buffer_constraints constraints;
 	struct timespec cur_ts = {0, 0};
 	ssize_t res1;
 	size_t in_capacity;
@@ -770,6 +795,7 @@ int main(int argc, char **argv)
 	int streaming_user_data_sei_version = 0; /* TODO */
 	int serialize_user_data = 0;
 	int rfc6184_nri_bits = 0; /* TODO */
+	unsigned int plane_count;
 
 	s_stopping = 0;
 	s_loop = NULL;
@@ -799,8 +825,6 @@ int main(int argc, char **argv)
 	memset(&self->config, 0, sizeof(self->config));
 	self->config.implem = VENC_ENCODER_IMPLEM_AUTO;
 	self->config.encoding = VDEF_ENCODING_H264;
-	self->config.output.preferred_format =
-		VDEF_CODED_DATA_FORMAT_BYTE_STREAM;
 
 	/* Default values */
 	self->input.info.color_primaries = VDEF_COLOR_PRIMARIES_BT709;
@@ -1028,6 +1052,32 @@ int main(int argc, char **argv)
 		reader_config.loop = self->input.loop;
 		reader_config.format = self->input.format;
 		reader_config.info = self->input.info;
+
+		res = venc_get_input_buffer_constraints(self->config.implem,
+							&reader_config.format,
+							&constraints);
+		if (res < 0) {
+			ULOG_ERRNO("venc_get_input_buffer_constraints", -res);
+			status = EXIT_FAILURE;
+			goto out;
+		} else {
+			plane_count = vdef_get_raw_frame_plane_count(
+				&reader_config.format);
+			memcpy(reader_config.plane_stride_align,
+			       constraints.plane_stride_align,
+			       plane_count *
+				       sizeof(*constraints.plane_stride_align));
+			memcpy(reader_config.plane_scanline_align,
+			       constraints.plane_scanline_align,
+			       plane_count *
+				       sizeof(*constraints
+						       .plane_scanline_align));
+			memcpy(reader_config.plane_size_align,
+			       constraints.plane_size_align,
+			       plane_count *
+				       sizeof(*constraints.plane_size_align));
+		}
+
 		if ((strlen(input) > 4) &&
 		    (strcmp(input + strlen(input) - 4, ".y4m") == 0))
 			reader_config.y4m = 1;
@@ -1091,6 +1141,11 @@ int main(int argc, char **argv)
 		printf("Output: file '%s'\n", output);
 	}
 	self->output.encoding = self->config.encoding;
+
+	self->config.output.preferred_format =
+		(self->config.encoding == VDEF_ENCODING_MJPEG)
+			? VDEF_CODED_DATA_FORMAT_JFIF
+			: VDEF_CODED_DATA_FORMAT_BYTE_STREAM;
 
 	if (self->input.decimation == 0)
 		self->input.decimation = 1;
@@ -1156,6 +1211,12 @@ int main(int argc, char **argv)
 		self->config.h265.streaming_user_data_sei_version =
 			streaming_user_data_sei_version;
 		self->config.h265.serialize_user_data = serialize_user_data;
+		break;
+	case VDEF_ENCODING_MJPEG:
+		self->config.mjpeg.rate_control = rate_control;
+		self->config.mjpeg.quality = qp;
+		self->config.mjpeg.max_bitrate = max_bitrate;
+		self->config.mjpeg.target_bitrate = target_bitrate;
 		break;
 	default:
 		break;

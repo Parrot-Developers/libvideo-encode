@@ -105,6 +105,9 @@ enum venc_encoder_implem {
 	/* HiSilicon encoder */
 	VENC_ENCODER_IMPLEM_HISI,
 
+	/* Qualcomm encoder */
+	VENC_ENCODER_IMPLEM_QCOM,
+
 	/* Mediacodec implementation */
 	VENC_ENCODER_IMPLEM_MEDIACODEC,
 
@@ -113,6 +116,11 @@ enum venc_encoder_implem {
 
 	/* Videotoolbox implementation */
 	VENC_ENCODER_IMPLEM_VIDEOTOOLBOX,
+
+	/* Turbojpeg implementation */
+	VENC_ENCODER_IMPLEM_TURBOJPEG,
+
+	VENC_ENCODER_IMPLEM_MAX,
 };
 
 
@@ -179,6 +187,11 @@ struct venc_config {
 	 * use the default value; 1 means no multi-threading;
 	 * only relevant for CPU encoding implementations) */
 	unsigned int preferred_thread_count;
+
+	/* Limit the number of frames that can be in the encoder pipeline
+	 * at any time. The frames will be waiting in the input queue
+	 * if the limit is reached. (0 means no limit). */
+	unsigned int preferred_max_frames_in_encoder;
 
 	/* Encoding type (mandatory) */
 	enum vdef_encoding encoding;
@@ -471,6 +484,22 @@ struct venc_dyn_config {
 	/* Framerate decimation factor (1 means no decimation;
 	 * if 0, defaults to current value) */
 	unsigned int decimation;
+};
+
+
+/* Encoder input buffer constraints */
+struct venc_input_buffer_constraints {
+	/* Stride alignment values: these values are used to align the width of
+	 * each plane in bytes */
+	unsigned int plane_stride_align[VDEF_RAW_MAX_PLANE_COUNT];
+
+	/* Scanline alignment values: these values are used to align the height
+	 * of each plane in lines */
+	unsigned int plane_scanline_align[VDEF_RAW_MAX_PLANE_COUNT];
+
+	/* Size alignment values: these values are used to align the size of
+	 * each plane to the upper size in bytes */
+	unsigned int plane_size_align[VDEF_RAW_MAX_PLANE_COUNT];
 };
 
 

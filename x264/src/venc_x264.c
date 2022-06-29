@@ -85,7 +85,7 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 			break;
 		case VENC_MSG_STOP:
 			stop_complete(self);
-			break;
+			return;
 		default:
 			ULOGE("unknown message: %c", message);
 			break;
@@ -537,6 +537,11 @@ static int encode_frame(struct venc_x264 *self,
 
 		self->in_picture.i_pts = self->x264_pts;
 		self->in_picture.opaque = in_frame;
+		self->in_picture.i_type = X264_TYPE_AUTO;
+		if (atomic_load(&self->insert_idr)) {
+			self->in_picture.i_type = X264_TYPE_IDR;
+			atomic_store(&self->insert_idr, false);
+		}
 
 		self->input_frame_cnt++;
 		self->x264_pts++;
@@ -1425,6 +1430,16 @@ static int set_dyn_config(struct venc_encoder *base,
 }
 
 
+static int request_idr(struct venc_encoder *base)
+{
+	struct venc_x264 *self = base->derived;
+
+	atomic_store(&self->insert_idr, true);
+
+	return 0;
+}
+
+
 const struct venc_ops venc_x264_ops = {
 	.get_supported_encodings = get_supported_encodings,
 	.get_supported_input_formats = get_supported_input_formats,
@@ -1436,4 +1451,5 @@ const struct venc_ops venc_x264_ops = {
 	.get_input_buffer_queue = get_input_buffer_queue,
 	.get_dyn_config = get_dyn_config,
 	.set_dyn_config = set_dyn_config,
+	.request_idr = request_idr,
 };

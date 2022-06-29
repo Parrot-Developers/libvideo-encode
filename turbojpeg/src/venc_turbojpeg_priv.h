@@ -24,59 +24,30 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _VENC_PRIV_H_
-#define _VENC_PRIV_H_
+#ifndef _VENC_TURBOJPEG_PRIV_H_
+#define _VENC_TURBOJPEG_PRIV_H_
 
-#define _GNU_SOURCE
-#include <errno.h>
-#include <inttypes.h>
 #include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <stdatomic.h>
+#include <stdbool.h>
 
 #include <futils/futils.h>
-#include <h264/h264.h>
-#include <video-encode/venc.h>
-#include <video-encode/venc_h264.h>
-#include <video-encode/venc_h265.h>
+#include <libpomp.h>
+
+#include <media-buffers/mbuf_coded_video_frame.h>
+#include <media-buffers/mbuf_mem.h>
+#include <media-buffers/mbuf_mem_generic.h>
+#include <media-buffers/mbuf_raw_video_frame.h>
+
+#include <video-encode/venc_core.h>
 #include <video-encode/venc_internal.h>
-#include <video-streaming/vstrm.h>
+#include <video-encode/venc_turbojpeg.h>
 
+#include <turbojpeg.h>
 
-#define VENC_H264_MAIN_PROFILE 77
-#define VENC_H264_LEVEL_4_0 40
-#define VENC_DEFAULT_GOP_LENGTH_SEC 1.f
-
-#define VENC_H265_MAIN_PROFILE 1
-#define VENC_H265_LEVEL_4_0 40
-
-#ifdef BUILD_LIBVIDEO_ENCODE_X264
-#	include <video-encode/venc_x264.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_HISI
-#	include <video-encode/venc_hisi.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_QCOM
-#	include <video-encode/venc_qcom.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_MEDIACODEC
-#	include <video-encode/venc_mediacodec.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_FAKEH264
-#	include <video-encode/venc_fakeh264.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_VIDEOTOOLBOX
-#	include <video-encode/venc_videotoolbox.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_TURBOJPEG
-#	include <video-encode/venc_turbojpeg.h>
-#endif
+#define VENC_MSG_FLUSH 'f'
+#define VENC_MSG_STOP 's'
+#define SOFTMPEG_MAX_PLANES 3
 
 static inline void xfree(void **ptr)
 {
@@ -86,11 +57,38 @@ static inline void xfree(void **ptr)
 	}
 }
 
+struct jpeg_picture {
+	enum TJSAMP subsamp;
+	unsigned int width;
+	unsigned int height;
+	unsigned int planes;
+	unsigned int flags;
+	unsigned int quality;
+	int stride[SOFTMPEG_MAX_PLANES];
+	const unsigned char *plane[SOFTMPEG_MAX_PLANES];
+};
 
-static inline char *xstrdup(const char *s)
-{
-	return s == NULL ? NULL : strdup(s);
-}
+struct venc_turbojpeg {
+	struct venc_encoder *base;
+
+	struct mbuf_raw_video_frame_queue *in_queue;
+	struct mbuf_coded_video_frame_queue *enc_out_queue;
+	struct pomp_evt *enc_out_queue_evt;
+
+	tjhandle tj_handler;
+
+	struct jpeg_picture in_picture;
+
+	struct vdef_coded_format output_format;
+	unsigned int input_frame_cnt;
+
+	pthread_t thread;
+	bool thread_launched;
+	atomic_bool should_stop;
+	atomic_bool flushing;
+	atomic_bool flush_discard;
+	struct mbox *mbox;
+};
 
 
-#endif /* !_VENC_PRIV_H_ */
+#endif /* !_VENC_TURBOJPEG_PRIV_H_ */

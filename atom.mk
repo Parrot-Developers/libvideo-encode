@@ -21,9 +21,11 @@ $(call load-config)
 LOCAL_CONDITIONAL_LIBRARIES := \
 	CONFIG_VENC_FAKEH264:libvideo-encode-fakeh264 \
 	CONFIG_VENC_HISI:libvideo-encode-hisi \
+	CONFIG_VENC_QCOM:libvideo-encode-qcom \
 	CONFIG_VENC_MEDIACODEC:libvideo-encode-mediacodec \
 	CONFIG_VENC_VIDEOTOOLBOX:libvideo-encode-videotoolbox \
-	CONFIG_VENC_X264:libvideo-encode-x264
+	CONFIG_VENC_X264:libvideo-encode-x264 \
+	CONFIG_VENC_TURBOJPEG:libvideo-encode-turbojpeg
 LOCAL_EXPORT_LDLIBS := -lvideo-encode-core
 
 include $(BUILD_LIBRARY)
@@ -53,6 +55,10 @@ LOCAL_LIBRARIES := \
 	libvideo-defs \
 	libvideo-metadata \
 	libvideo-streaming
+
+ifeq ("$(TARGET_OS)","windows")
+  LOCAL_LDLIBS += -lws2_32
+endif
 
 include $(BUILD_LIBRARY)
 
@@ -135,8 +141,36 @@ LOCAL_LIBRARIES := \
 	libvideo-streaming \
 	x264
 
+ifeq ("$(TARGET_OS)","windows")
+  LOCAL_LDLIBS += -lws2_32
+endif
+
 include $(BUILD_LIBRARY)
 
+include $(CLEAR_VARS)
+
+# turbojpeg implementation. can be enabled in the product configuration.
+LOCAL_MODULE := libvideo-encode-turbojpeg
+LOCAL_CATEGORY_PATH := libs
+LOCAL_DESCRIPTION := Video encoding library: turbojpeg implementation
+LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/turbojpeg/include
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_SRC_FILES := \
+	turbojpeg/src/venc_turbojpeg.c
+LOCAL_LIBRARIES := \
+	libfutils \
+	libjpeg-turbo \
+	libmedia-buffers \
+	libmedia-buffers-memory \
+	libmedia-buffers-memory-generic \
+	libpomp \
+	libulog \
+	libvideo-defs \
+	libvideo-encode-core \
+	libvideo-metadata \
+	libvideo-streaming
+
+include $(BUILD_LIBRARY)
 
 include $(CLEAR_VARS)
 
@@ -156,5 +190,9 @@ LOCAL_LIBRARIES := \
 	libvideo-defs \
 	libvideo-encode \
 	libvideo-raw
+
+ifeq ("$(TARGET_OS)","windows")
+  LOCAL_LDLIBS += -lws2_32
+endif
 
 include $(BUILD_EXECUTABLE)

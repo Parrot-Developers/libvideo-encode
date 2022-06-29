@@ -76,6 +76,7 @@ struct venc_x264 {
 	bool recovery_point;
 	pthread_t thread;
 	bool thread_launched;
+	atomic_bool insert_idr;
 	atomic_bool should_stop;
 	atomic_bool flushing;
 	atomic_bool flush_discard;
