@@ -311,13 +311,11 @@ static int fill_frame(struct venc_x264 *self,
 {
 	int ret = 0;
 	struct vmeta_frame *metadata = NULL;
-	struct mbuf_ancillary_data *ancillary_data = NULL;
-	const void *data;
-	size_t len;
 
 	if (frame_size == 0)
 		goto out;
 
+	/* Ancillary data */
 	ret = mbuf_raw_video_frame_foreach_ancillary_data(
 		in_frame,
 		mbuf_coded_video_frame_ancillary_data_copier,
@@ -340,89 +338,11 @@ static int fill_frame(struct venc_x264 *self,
 		goto out;
 	}
 
-	/* AUD insertion */
-	if (self->base->config.h264.insert_aud)
-		venc_h264_aud_write(self->base->h264.ctx, out_frame);
-
-	/* SPS/PPS insertion */
-	if ((self->base->config.h264.insert_ps) &&
-	    (self->base->h264.sps != NULL) && (self->base->h264.sps_size > 0) &&
-	    (self->base->h264.pps != NULL) && (self->base->h264.pps_size > 0) &&
-	    ((out_info->type == VDEF_CODED_FRAME_TYPE_IDR) ||
-	     (out_info->type == VDEF_CODED_FRAME_TYPE_I) ||
-	     (out_info->type == VDEF_CODED_FRAME_TYPE_P_IR_START))) {
-		venc_h264_sps_pps_copy(self->base->h264.ctx,
-				       out_frame,
-				       self->base->h264.sps,
-				       self->base->h264.sps_size,
-				       self->base->h264.pps,
-				       self->base->h264.pps_size);
-	}
-
-	/* Generate SEI */
-	ret = venc_h264_sei_reset(self->base->h264.ctx);
-	if (ret == 0) {
-		if ((self->base->config.h264.insert_recovery_point_sei) &&
-		    ((out_info->type == VDEF_CODED_FRAME_TYPE_IDR) ||
-		     (out_info->type == VDEF_CODED_FRAME_TYPE_I) ||
-		     (out_info->type == VDEF_CODED_FRAME_TYPE_P_IR_START))) {
-			/* Recovery point sei */
-			venc_h264_sei_add_recovery_point(
-				self->base->h264.ctx,
-				self->base->recovery_frame_cnt);
-		}
-		if ((self->base->config.h264.insert_pic_timing_sei) &&
-		    (out_info->info.capture_timestamp != 0)) {
-			/* Picture timing sei */
-			venc_h264_sei_add_picture_timing(
-				self->base->h264.ctx,
-				out_info->info.capture_timestamp);
-		}
-		if ((out_info->type == VDEF_CODED_FRAME_TYPE_IDR) ||
-		    (out_info->type == VDEF_CODED_FRAME_TYPE_I) ||
-		    (out_info->type == VDEF_CODED_FRAME_TYPE_P_IR_START)) {
-			switch (self->base->config.h264
-					.streaming_user_data_sei_version) {
-			case 2:
-				/* "Parrot Streaming" v2 user data sei */
-				venc_h264_sei_add_parrot_streaming_v2_user_data(
-					self->base->h264.ctx,
-					self->base->slice_count,
-					self->base->slice_mb_count);
-				break;
-			case 4:
-				/* "Parrot Streaming" v4 user data sei */
-				venc_h264_sei_add_parrot_streaming_v4_user_data(
-					self->base->h264.ctx,
-					self->base->slice_mb_count,
-					/* clang-format off */
-					/* codecheck_ignore[LONG_LINE] */
-					self->base->slice_mb_count_recovery_point);
-				/* clang-format on */
-				break;
-			default:
-				break;
-			}
-		}
-		if (self->base->config.h264.serialize_user_data) {
-			/* User data sei */
-			ret = mbuf_raw_video_frame_get_ancillary_data(
-				in_frame,
-				MBUF_ANCILLARY_KEY_USERDATA_SEI,
-				&ancillary_data);
-			if (ret == 0) {
-				data = mbuf_ancillary_data_get_buffer(
-					ancillary_data, &len);
-				if (data && (len >= 16)) {
-					venc_h264_sei_add_user_data(
-						self->base->h264.ctx,
-						data,
-						len);
-				}
-				mbuf_ancillary_data_unref(ancillary_data);
-			}
-		}
-		venc_h264_sei_write(self->base->h264.ctx, out_frame);
+	/* Add generated NAL units */
+	ret = venc_h264_generate_nalus(self->base, out_frame, out_info);
+	if (ret < 0) {
+		ULOG_ERRNO("venc_h264_generate_nalus", -ret);
+		goto out;
 	}
 
 	/* Add x264 NAL units */

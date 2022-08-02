@@ -763,9 +763,10 @@ int venc_h264_generate_nalus(struct venc_encoder *self,
 			goto out;
 		sei_count++;
 	}
-	if ((info->type == VDEF_CODED_FRAME_TYPE_IDR) ||
-	    (info->type == VDEF_CODED_FRAME_TYPE_I) ||
-	    (info->type == VDEF_CODED_FRAME_TYPE_P_IR_START)) {
+	if (self->config.h264.streaming_user_data_sei_version &&
+	    ((info->type == VDEF_CODED_FRAME_TYPE_IDR) ||
+	     (info->type == VDEF_CODED_FRAME_TYPE_I) ||
+	     (info->type == VDEF_CODED_FRAME_TYPE_P_IR_START))) {
 		switch (self->config.h264.streaming_user_data_sei_version) {
 		case 2:
 			/* "Parrot Streaming" v2 user data sei */
@@ -783,6 +784,10 @@ int venc_h264_generate_nalus(struct venc_encoder *self,
 			break;
 		default:
 			ret = -ENOSYS;
+			ULOG_ERRNO("unsupported streaming_user_data format: %d",
+				   -ret,
+				   self->config.h264
+					   .streaming_user_data_sei_version);
 			break;
 		}
 		if (ret < 0)

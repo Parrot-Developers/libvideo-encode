@@ -187,7 +187,7 @@ int venc_h265_aud_write(struct h265_ctx *h265,
 	nh.nuh_temporal_id_plus1 = 1;
 	res = h265_ctx_set_nalu_header(h265, &nh);
 	if (res < 0) {
-		ULOG_ERRNO("h264_ctx_set_nalu_header", -res);
+		ULOG_ERRNO("h265_ctx_set_nalu_header", -res);
 		return res;
 	}
 
@@ -897,7 +897,7 @@ int venc_h265_generate_nalus(struct venc_encoder *self,
 	if (sei_count == 0)
 		return 0;
 
-	ret = venc_h264_sei_write(self->h264.ctx, frame);
+	ret = venc_h265_sei_write(self->h265.ctx, frame);
 	if (ret < 0)
 		goto out;
 
