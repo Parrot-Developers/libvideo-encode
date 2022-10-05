@@ -39,6 +39,9 @@ ULOG_DECLARE_TAG(ULOG_TAG);
 #include <media-buffers/mbuf_mem_generic.h>
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
+#include <video-encode/venc_core.h>
+#include <video-encode/venc_h264.h>
+#include <video-encode/venc_h265.h>
 #include <video-encode/venc_internal.h>
 #include <video-encode/venc_mediacodec.h>
 
@@ -383,6 +386,12 @@ static void store_ps(struct venc_mediacodec *self,
 			&self->pending.pps_size,
 		};
 		copy_nalus(a, lens, 2, p, size);
+		/* Initialize the H.264 writer */
+		venc_h264_writer_new(self->pending.sps,
+				     self->pending.sps_size,
+				     self->pending.pps,
+				     self->pending.pps_size,
+				     &self->base->h264.ctx);
 		break;
 	}
 
@@ -398,6 +407,14 @@ static void store_ps(struct venc_mediacodec *self,
 			&self->pending.pps_size,
 		};
 		copy_nalus(a, lens, 3, p, size);
+		/* Initialize the H.265 writer */
+		venc_h265_writer_new(self->pending.vps,
+				     self->pending.vps_size,
+				     self->pending.sps,
+				     self->pending.sps_size,
+				     self->pending.pps,
+				     self->pending.pps_size,
+				     &self->base->h265.ctx);
 		break;
 	}
 
@@ -973,6 +990,30 @@ static void pull_frame(struct venc_mediacodec *self,
 		}
 	}
 
+	if (self->base->config.encoding == VDEF_ENCODING_H264) {
+		/* Add generated NAL units */
+		/* TODO: Set SPS and PPS in base before first frame */
+		res = venc_h264_generate_nalus(
+			self->base, out_frame, &out_info);
+		if (res < 0) {
+			ULOG_ERRNO("venc_h264_generate_nalus", -res);
+			mbuf_mem_unref(mem);
+			mbuf_coded_video_frame_unref(out_frame);
+			return;
+		}
+	} else if (self->base->config.encoding == VDEF_ENCODING_H265) {
+		/* Add generated NAL units */
+		/* TODO: Set VPS, SPS and PPS in base before first frame */
+		res = venc_h265_generate_nalus(
+			self->base, out_frame, &out_info);
+		if (res < 0) {
+			ULOG_ERRNO("venc_h265_generate_nalus", -res);
+			mbuf_mem_unref(mem);
+			mbuf_coded_video_frame_unref(out_frame);
+			return;
+		}
+	}
+
 	p = out_data;
 	n = info.size;
 	while (true) {
@@ -1001,9 +1042,26 @@ static void pull_frame(struct venc_mediacodec *self,
 		switch (self->base->config.encoding) {
 		case VDEF_ENCODING_H264:
 			nalu.h264.type = (*(p + 4) & 0x1F);
+			if ((nalu.h264.type == H264_NALU_TYPE_AUD) ||
+			    (nalu.h264.type == H264_NALU_TYPE_SPS) ||
+			    (nalu.h264.type == H264_NALU_TYPE_PPS) ||
+			    (nalu.h264.type == H264_NALU_TYPE_SEI)) {
+				p = q;
+				n = m;
+				continue;
+			}
 			break;
 		case VDEF_ENCODING_H265:
 			nalu.h265.type = ((*(p + 4) & 0x7E) >> 1);
+			if ((nalu.h265.type == H265_NALU_TYPE_AUD_NUT) ||
+			    (nalu.h265.type == H265_NALU_TYPE_VPS_NUT) ||
+			    (nalu.h265.type == H265_NALU_TYPE_SPS_NUT) ||
+			    (nalu.h265.type == H265_NALU_TYPE_PPS_NUT) ||
+			    (nalu.h265.type == H265_NALU_TYPE_PREFIX_SEI_NUT)) {
+				p = q;
+				n = m;
+				continue;
+			}
 			break;
 		default:
 			break;

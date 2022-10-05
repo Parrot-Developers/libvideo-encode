@@ -102,11 +102,17 @@ enum venc_encoder_implem {
 	/* x264 H.264 encoder */
 	VENC_ENCODER_IMPLEM_X264,
 
+	/* x264 H.265 encoder */
+	VENC_ENCODER_IMPLEM_X265,
+
 	/* HiSilicon encoder */
 	VENC_ENCODER_IMPLEM_HISI,
 
 	/* Qualcomm encoder */
 	VENC_ENCODER_IMPLEM_QCOM,
+
+	/* Qualcomm encoder: JPEG implementation */
+	VENC_ENCODER_IMPLEM_QCOM_JPEG,
 
 	/* Mediacodec implementation */
 	VENC_ENCODER_IMPLEM_MEDIACODEC,

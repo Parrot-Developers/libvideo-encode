@@ -27,7 +27,10 @@
 #ifndef _VENC_INTERNAL_H_
 #define _VENC_INTERNAL_H_
 
-#define _GNU_SOURCE
+#ifndef _GNU_SOURCE
+#	define _GNU_SOURCE
+#endif
+
 #include <h264/h264.h>
 #include <inttypes.h>
 #include <video-streaming/vstrm.h>

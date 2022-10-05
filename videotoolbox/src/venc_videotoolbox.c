@@ -129,53 +129,6 @@ copy_ps(uint8_t **dst, size_t *dst_size, const uint8_t *src, size_t src_size)
 }
 
 
-static void store_ps(struct venc_videotoolbox *self)
-{
-
-	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
-	pthread_mutex_lock(&self->ps_lock);
-
-	switch (self->base->config.encoding) {
-	case VDEF_ENCODING_H264:
-
-		copy_ps(&self->base->h264.sps,
-			&self->base->h264.sps_size,
-			self->h264.sps,
-			self->h264.sps_size);
-
-		copy_ps(&self->base->h264.pps,
-			&self->base->h264.pps_size,
-			self->h264.pps,
-			self->h264.pps_size);
-
-		break;
-	case VDEF_ENCODING_H265:
-
-		copy_ps(&self->base->h265.vps,
-			&self->base->h265.vps_size,
-			self->h265.vps,
-			self->h265.vps_size);
-
-		copy_ps(&self->base->h265.sps,
-			&self->base->h265.sps_size,
-			self->h265.sps,
-			self->h265.sps_size);
-
-		copy_ps(&self->base->h265.pps,
-			&self->base->h265.pps_size,
-			self->h265.pps,
-			self->h265.pps_size);
-
-		break;
-	default:
-		break;
-	}
-
-	atomic_store(&self->ps_stored, true);
-	pthread_mutex_unlock(&self->ps_lock);
-}
-
-
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct venc_videotoolbox *self = userdata;
@@ -200,9 +153,6 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 			break;
 		case VENC_VIDEOTOOLBOX_MESSAGE_TYPE_ERROR:
 			encoder_error(self, message.error);
-			break;
-		case VENC_VIDEOTOOLBOX_MESSAGE_TYPE_PS:
-			store_ps(self);
 			break;
 		default:
 			ULOGE("unknown message type: %d", message.type);
@@ -466,6 +416,26 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 		goto out;
 	}
 
+	if (self->base->config.encoding == VDEF_ENCODING_H264) {
+		/* Add generated NAL units */
+		/* TODO: Set SPS and PPS in base before first frame */
+		ret = venc_h264_generate_nalus(
+			self->base, *out_frame, &out_info);
+		if (ret < 0) {
+			ULOG_ERRNO("venc_h264_generate_nalus", -ret);
+			goto out;
+		}
+	} else if (self->base->config.encoding == VDEF_ENCODING_H265) {
+		/* Add generated NAL units */
+		/* TODO: Set VPS, SPS and PPS in base before first frame */
+		ret = venc_h265_generate_nalus(
+			self->base, *out_frame, &out_info);
+		if (ret < 0) {
+			ULOG_ERRNO("venc_h265_generate_nalus", -ret);
+			goto out;
+		}
+	}
+
 	data = start;
 	offset = 0;
 	while (offset < len) {
@@ -475,10 +445,29 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 		if (format == VDEF_CODED_DATA_FORMAT_BYTE_STREAM)
 			memcpy(data, start_code, sizeof(start_code));
 
-		if (self->base->config.encoding == VDEF_ENCODING_H264)
+		if (self->base->config.encoding == VDEF_ENCODING_H264) {
 			out_nalu.h264.type = (*(data + 4) & 0x1F);
-		else if (self->base->config.encoding == VDEF_ENCODING_H265)
+			if ((out_nalu.h264.type == H264_NALU_TYPE_AUD) ||
+			    (out_nalu.h264.type == H264_NALU_TYPE_SPS) ||
+			    (out_nalu.h264.type == H264_NALU_TYPE_PPS) ||
+			    (out_nalu.h264.type == H264_NALU_TYPE_SEI)) {
+				data += 4 + nalu_len;
+				offset += 4 + nalu_len;
+				continue;
+			}
+		} else if (self->base->config.encoding == VDEF_ENCODING_H265) {
 			out_nalu.h265.type = ((*(data + 4) & 0x7E) >> 1);
+			if ((out_nalu.h265.type == H265_NALU_TYPE_AUD_NUT) ||
+			    (out_nalu.h265.type == H265_NALU_TYPE_VPS_NUT) ||
+			    (out_nalu.h265.type == H265_NALU_TYPE_SPS_NUT) ||
+			    (out_nalu.h265.type == H265_NALU_TYPE_PPS_NUT) ||
+			    (out_nalu.h265.type ==
+			     H265_NALU_TYPE_PREFIX_SEI_NUT)) {
+				data += 4 + nalu_len;
+				offset += 4 + nalu_len;
+				continue;
+			}
+		}
 
 		out_nalu.size = nalu_len + 4;
 		ret = mbuf_coded_video_frame_add_nalu(
@@ -492,114 +481,6 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 		offset += 4 + nalu_len;
 	}
 out:
-	err = mbuf_mem_unref(mem);
-	if (err != 0)
-		ULOG_ERRNO("mbuf_mem_unref", -err);
-
-	return ret;
-}
-
-
-static int insert_h264_ps(struct venc_videotoolbox *self,
-			  struct mbuf_coded_video_frame *out_frame,
-			  CMVideoFormatDescriptionRef format)
-{
-	int ret, err;
-	size_t ps_count, ps_size, len;
-	const uint8_t *ps;
-	uint8_t *data;
-	void *void_data;
-	struct mbuf_mem *mem = NULL;
-	struct vdef_nalu nalu;
-	uint8_t start_code[] = {0, 0, 0, 1};
-
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(out_frame == NULL, EINVAL);
-
-	ret = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-		format, 0, NULL, NULL, &ps_count, NULL);
-	if (ret) {
-		ret = -EAGAIN;
-		ULOGE("no PS available");
-		return ret;
-	}
-	if (ps_count < 2) {
-		ret = -ENOSYS;
-		ULOG_ERRNO("not enough PS", -ret);
-		return ret;
-	} else if (ps_count > 2) {
-		ret = -ENOSYS;
-		ULOG_ERRNO("too many PS", -ret);
-		return ret;
-	}
-
-	ret = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-		format, 0, &ps, &ps_size, NULL, NULL);
-	if (ret) {
-		ULOG_ERRNO("CMVideoFormatDescriptionGetH264ParameterSetAtIndex",
-			   -ret);
-		return ret;
-	}
-	ret = mbuf_mem_generic_new(ps_size + sizeof(start_code), &mem);
-	if (ret < 0) {
-		ULOG_ERRNO("mbuf_mem_generic_new", -ret);
-		return ret;
-	}
-	ret = mbuf_mem_get_data(mem, &void_data, &len);
-	if (ret < 0) {
-		ULOG_ERRNO("mbuf_mem_get_data", -ret);
-		goto end;
-	}
-	data = (uint8_t *)void_data;
-	memcpy(data, start_code, sizeof(start_code));
-	data += sizeof(start_code);
-	memcpy(data, (uint8_t *)ps, ps_size);
-
-	nalu.h264.type = H264_NALU_TYPE_SPS;
-	nalu.h264.slice_type = H264_SLICE_TYPE_UNKNOWN;
-	nalu.h264.slice_mb_count = 0;
-	nalu.size = len;
-
-	ret = mbuf_coded_video_frame_insert_nalu(out_frame, mem, 0, &nalu, 0);
-	if (ret < 0) {
-		ULOG_ERRNO("insert_ps", -ret);
-		goto end;
-	}
-
-	ret = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-		format, 1, &ps, &ps_size, NULL, NULL);
-	if (ret) {
-		ULOG_ERRNO("CMVideoFormatDescriptionGetH264ParameterSetAtIndex",
-			   -ret);
-		goto end;
-	}
-	ret = mbuf_mem_generic_new(ps_size + sizeof(start_code), &mem);
-	if (ret < 0) {
-		ULOG_ERRNO("mbuf_mem_generic_new", -ret);
-		goto end;
-	}
-	ret = mbuf_mem_get_data(mem, &void_data, &len);
-	if (ret < 0) {
-		ULOG_ERRNO("mbuf_mem_get_data", -ret);
-		goto end;
-	}
-	data = (uint8_t *)void_data;
-	memcpy(data, start_code, sizeof(start_code));
-	data += sizeof(start_code);
-	memcpy(data, (uint8_t *)ps, ps_size);
-
-	nalu.h264.type = H264_NALU_TYPE_PPS;
-	nalu.h264.slice_type = H264_SLICE_TYPE_UNKNOWN;
-	nalu.h264.slice_mb_count = 0;
-	nalu.size = len;
-
-	ret = mbuf_coded_video_frame_insert_nalu(out_frame, mem, 0, &nalu, 1);
-	if (ret < 0) {
-		ULOG_ERRNO("insert_ps", -ret);
-		goto end;
-	}
-
-end:
 	err = mbuf_mem_unref(mem);
 	if (err != 0)
 		ULOG_ERRNO("mbuf_mem_unref", -err);
@@ -642,7 +523,7 @@ static int set_h264_ps(struct venc_videotoolbox *self,
 			   -ret);
 		goto end;
 	}
-	copy_ps(&self->h264.sps, &self->h264.sps_size, ps, ps_size);
+	copy_ps(&self->base->h264.sps, &self->base->h264.sps_size, ps, ps_size);
 
 	ret = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
 		format, 1, &ps, &ps_size, NULL, NULL);
@@ -651,157 +532,16 @@ static int set_h264_ps(struct venc_videotoolbox *self,
 			   -ret);
 		goto end;
 	}
-	copy_ps(&self->h264.pps, &self->h264.pps_size, ps, ps_size);
+	copy_ps(&self->base->h264.pps, &self->base->h264.pps_size, ps, ps_size);
 
-	struct venc_videotoolbox_message message = {
-		.type = VENC_VIDEOTOOLBOX_MESSAGE_TYPE_PS,
-	};
-	ret = mbox_push(self->mbox, &message);
-	if (ret)
-		ULOG_ERRNO("mbox_push", -ret);
-
+	/* Initialize the H.264 writer */
+	venc_h264_writer_new(self->base->h264.sps,
+			     self->base->h264.sps_size,
+			     self->base->h264.pps,
+			     self->base->h264.pps_size,
+			     &self->base->h264.ctx);
 end:
 	pthread_mutex_unlock(&self->ps_lock);
-
-	return ret;
-}
-
-
-static int insert_h265_ps(struct venc_videotoolbox *self,
-			  struct mbuf_coded_video_frame *out_frame,
-			  CMVideoFormatDescriptionRef format)
-{
-	int ret = 0;
-	size_t ps_count, ps_size, len;
-	const uint8_t *ps;
-	uint8_t *data;
-	void *void_data;
-	struct mbuf_mem *mem = NULL;
-	struct vdef_nalu nalu;
-	uint8_t start_code[] = {0, 0, 0, 1};
-
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
-
-	if (__builtin_available(iOS 11.0, macOS 10.13, tvos 11.0, *)) {
-
-		ret = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-			format, 0, NULL, NULL, &ps_count, NULL);
-		if (ret) {
-			ret = -EAGAIN;
-			ULOGE("no PS available");
-			goto end;
-		}
-		if (ps_count < 3) {
-			ret = -ENOSYS;
-			ULOG_ERRNO("not enough PS", -ret);
-			goto end;
-		} else if (ps_count > 3) {
-			ret = -ENOSYS;
-			ULOG_ERRNO("too many PS", -ret);
-			goto end;
-		}
-
-		ret = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-			format, 0, &ps, &ps_size, NULL, NULL);
-		if (ret) {
-			ULOG_ERRNO(
-				"CMVideoFormatDescriptionGetHEVCParameterSetAtIndex",
-				-ret);
-			goto end;
-		}
-		ret = mbuf_mem_generic_new(ps_size + sizeof(start_code), &mem);
-		if (ret < 0) {
-			ULOG_ERRNO("mbuf_mem_generic_new", -ret);
-			goto end;
-		}
-		ret = mbuf_mem_get_data(mem, &void_data, &len);
-		if (ret < 0) {
-			ULOG_ERRNO("mbuf_mem_get_data", -ret);
-			goto end;
-		}
-		data = (uint8_t *)void_data;
-		memcpy(data, start_code, sizeof(start_code));
-		data += sizeof(start_code);
-		memcpy(data, (uint8_t *)ps, ps_size);
-
-		nalu.h265.type = H265_NALU_TYPE_VPS_NUT;
-		nalu.size = len;
-
-		ret = mbuf_coded_video_frame_insert_nalu(
-			out_frame, mem, 0, &nalu, 0);
-		if (ret < 0) {
-			ULOG_ERRNO("insert_ps", -ret);
-			goto end;
-		}
-
-		ret = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-			format, 1, &ps, &ps_size, NULL, NULL);
-		if (ret) {
-			ULOG_ERRNO(
-				"CMVideoFormatDescriptionGetHEVCParameterSetAtIndex",
-				-ret);
-			goto end;
-		}
-		ret = mbuf_mem_generic_new(ps_size + sizeof(start_code), &mem);
-		if (ret < 0) {
-			ULOG_ERRNO("mbuf_mem_generic_new", -ret);
-			goto end;
-		}
-		ret = mbuf_mem_get_data(mem, &void_data, &len);
-		if (ret < 0) {
-			ULOG_ERRNO("mbuf_mem_get_data", -ret);
-			goto end;
-		}
-		data = (uint8_t *)void_data;
-		memcpy(data, start_code, sizeof(start_code));
-		data += sizeof(start_code);
-		memcpy(data, (uint8_t *)ps, ps_size);
-
-		nalu.h265.type = H265_NALU_TYPE_SPS_NUT;
-		nalu.size = len;
-
-		ret = mbuf_coded_video_frame_insert_nalu(
-			out_frame, mem, 0, &nalu, 1);
-		if (ret < 0) {
-			ULOG_ERRNO("insert_ps", -ret);
-			goto end;
-		}
-
-		ret = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-			format, 2, &ps, &ps_size, NULL, NULL);
-		if (ret) {
-			ULOG_ERRNO(
-				"CMVideoFormatDescriptionGetHEVCParameterSetAtIndex",
-				-ret);
-			goto end;
-		}
-		ret = mbuf_mem_generic_new(ps_size + sizeof(start_code), &mem);
-		if (ret < 0) {
-			ULOG_ERRNO("mbuf_mem_generic_new", -ret);
-			goto end;
-		}
-		ret = mbuf_mem_get_data(mem, &void_data, &len);
-		if (ret < 0) {
-			ULOG_ERRNO("mbuf_mem_get_data", -ret);
-			goto end;
-		}
-		data = (uint8_t *)void_data;
-		memcpy(data, start_code, sizeof(start_code));
-		data += sizeof(start_code);
-		memcpy(data, (uint8_t *)ps, ps_size);
-
-		nalu.h265.type = H265_NALU_TYPE_PPS_NUT;
-		nalu.size = len;
-
-		ret = mbuf_coded_video_frame_insert_nalu(
-			out_frame, mem, 0, &nalu, 2);
-		if (ret < 0) {
-			ULOG_ERRNO("insert_ps", -ret);
-			goto end;
-		}
-	}
-
-end:
 
 	return ret;
 }
@@ -844,8 +584,10 @@ static int set_h265_ps(struct venc_videotoolbox *self,
 				-ret);
 			goto end;
 		}
-
-		copy_ps(&self->h265.vps, &self->h265.vps_size, ps, ps_size);
+		copy_ps(&self->base->h265.vps,
+			&self->base->h265.vps_size,
+			ps,
+			ps_size);
 
 		ret = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
 			format, 1, &ps, &ps_size, NULL, NULL);
@@ -855,8 +597,10 @@ static int set_h265_ps(struct venc_videotoolbox *self,
 				-ret);
 			goto end;
 		}
-
-		copy_ps(&self->h265.sps, &self->h265.sps_size, ps, ps_size);
+		copy_ps(&self->base->h265.sps,
+			&self->base->h265.sps_size,
+			ps,
+			ps_size);
 
 		ret = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
 			format, 2, &ps, &ps_size, NULL, NULL);
@@ -866,15 +610,19 @@ static int set_h265_ps(struct venc_videotoolbox *self,
 				-ret);
 			goto end;
 		}
+		copy_ps(&self->base->h265.pps,
+			&self->base->h265.pps_size,
+			ps,
+			ps_size);
 
-		copy_ps(&self->h265.pps, &self->h265.pps_size, ps, ps_size);
-
-		struct venc_videotoolbox_message message = {
-			.type = VENC_VIDEOTOOLBOX_MESSAGE_TYPE_PS,
-		};
-		ret = mbox_push(self->mbox, &message);
-		if (ret)
-			ULOG_ERRNO("mbox_push", -ret);
+		/* Initialize the H.265 writer */
+		venc_h265_writer_new(self->base->h265.vps,
+				     self->base->h265.vps_size,
+				     self->base->h265.sps,
+				     self->base->h265.sps_size,
+				     self->base->h265.pps,
+				     self->base->h265.pps_size,
+				     &self->base->h265.ctx);
 	}
 
 end:
@@ -885,7 +633,6 @@ end:
 
 
 static int set_ps(struct venc_videotoolbox *self,
-		  struct mbuf_coded_video_frame *out_frame,
 		  CMSampleBufferRef sample_buffer)
 {
 	int ret = 0;
@@ -899,47 +646,25 @@ static int set_ps(struct venc_videotoolbox *self,
 
 	switch (self->base->config.encoding) {
 	case VDEF_ENCODING_H264:
-		if (self->base->config.h264.insert_ps) {
-			/* Insert ps in bytestream */
-			ret = insert_h264_ps(self, out_frame, format);
-			if (ret) {
-				ULOG_ERRNO("insert_h264_ps", -ret);
-				goto out;
-			}
-			atomic_store(&self->ps_stored, true);
-		} else {
-			ret = set_h264_ps(self, format);
-			if (ret) {
-				ULOG_ERRNO("set_h264_ps", -ret);
-				goto out;
-			}
+		ret = set_h264_ps(self, format);
+		if (ret) {
+			ULOG_ERRNO("set_h264_ps", -ret);
+			goto out;
 		}
+		atomic_store(&self->ps_stored, true);
 		break;
 	case VDEF_ENCODING_H265:
-		if (self->base->config.h265.insert_ps) {
-			/* Insert ps in bytestream */
-			ret = insert_h265_ps(self, out_frame, format);
-			if (ret) {
-				ULOG_ERRNO("insert_h265_ps", -ret);
-				goto out;
-			}
-			atomic_store(&self->ps_stored, true);
-		} else {
-			ret = set_h265_ps(self, format);
-			if (ret) {
-				ULOG_ERRNO("set_h265_ps", -ret);
-				goto out;
-			}
+		ret = set_h265_ps(self, format);
+		if (ret) {
+			ULOG_ERRNO("set_h265_ps", -ret);
+			goto out;
 		}
+		atomic_store(&self->ps_stored, true);
 		break;
 	default:
 		break;
 	}
 
-	atomic_store(&self->ps_set, true);
-	if ((self->base->config.h264.insert_ps == 1) ||
-	    (self->base->config.h265.insert_ps == 1))
-		atomic_store(&self->ps_stored, true);
 out:
 	return ret;
 }
@@ -983,19 +708,19 @@ static void frame_output_cb(void *outputCallbackRefCon,
 		goto out;
 	}
 
+	if (atomic_load(&self->ps_stored) == false) {
+		ret = set_ps(self, sampleBuffer);
+		if (ret < 0) {
+			ULOG_ERRNO("set_ps", -ret);
+			goto out;
+		}
+	}
+
 	/* Set the metadata */
 	ret = set_frame_metadata(self, in_frame, &out_frame, bbuf);
 	if (ret < 0) {
 		ULOG_ERRNO("set_frame_metadata", -ret);
 		goto out;
-	}
-
-	if (atomic_load(&self->ps_set) == false) {
-		ret = set_ps(self, out_frame, sampleBuffer);
-		if (ret < 0) {
-			ULOG_ERRNO("set_ps", -ret);
-			goto out;
-		}
 	}
 
 	time_get_monotonic(&cur_ts);

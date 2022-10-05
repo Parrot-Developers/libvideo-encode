@@ -10,11 +10,23 @@
         help
             Enable the Qualcomm implementation in libvideo-encode.
 
+    config VENC_QCOM_JPEG
+        bool "venc qcom JPEG implementation"
+            default false
+        help
+            Enable the Qualcomm JPEG implementation in libvideo-encode.
+
     config VENC_X264
         bool "venc x264 implementation"
             default false
         help
             Enable the x264 implementation in libvideo-encode.
+
+    config VENC_X265
+        bool "venc x265 implementation"
+            default false
+        help
+            Enable the x265 implementation in libvideo-encode.
 
     config VENC_FAKEH264
         bool "venc fakeh264 implementation"

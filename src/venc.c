@@ -42,6 +42,10 @@ static const struct venc_ops *implem_ops(enum venc_encoder_implem implem)
 	case VENC_ENCODER_IMPLEM_QCOM:
 		return &venc_qcom_ops;
 #endif
+#ifdef BUILD_LIBVIDEO_ENCODE_QCOM_JPEG
+	case VENC_ENCODER_IMPLEM_QCOM_JPEG:
+		return &venc_qcom_jpeg_ops;
+#endif
 #ifdef BUILD_LIBVIDEO_ENCODE_MEDIACODEC
 	case VENC_ENCODER_IMPLEM_MEDIACODEC:
 		return &venc_mediacodec_ops;
@@ -50,13 +54,17 @@ static const struct venc_ops *implem_ops(enum venc_encoder_implem implem)
 	case VENC_ENCODER_IMPLEM_VIDEOTOOLBOX:
 		return &venc_videotoolbox_ops;
 #endif
+#ifdef BUILD_LIBVIDEO_ENCODE_TURBOJPEG
+	case VENC_ENCODER_IMPLEM_TURBOJPEG:
+		return &venc_turbojpeg_ops;
+#endif
 #ifdef BUILD_LIBVIDEO_ENCODE_X264
 	case VENC_ENCODER_IMPLEM_X264:
 		return &venc_x264_ops;
 #endif
-#ifdef BUILD_LIBVIDEO_ENCODE_TURBOJPEG
-	case VENC_ENCODER_IMPLEM_TURBOJPEG:
-		return &venc_turbojpeg_ops;
+#ifdef BUILD_LIBVIDEO_ENCODE_X265
+	case VENC_ENCODER_IMPLEM_X265:
+		return &venc_x265_ops;
 #endif
 #ifdef BUILD_LIBVIDEO_ENCODE_FAKEH264
 	case VENC_ENCODER_IMPLEM_FAKEH264:
@@ -90,6 +98,14 @@ static int venc_get_implem(enum venc_encoder_implem *implem)
 	}
 #endif
 
+#ifdef BUILD_LIBVIDEO_ENCODE_QCOM_JPEG
+	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
+	    (*implem == VENC_ENCODER_IMPLEM_QCOM_JPEG)) {
+		*implem = VENC_ENCODER_IMPLEM_QCOM_JPEG;
+		return 0;
+	}
+#endif
+
 #ifdef BUILD_LIBVIDEO_ENCODE_MEDIACODEC
 	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
 	    (*implem == VENC_ENCODER_IMPLEM_MEDIACODEC)) {
@@ -110,6 +126,14 @@ static int venc_get_implem(enum venc_encoder_implem *implem)
 	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
 	    (*implem == VENC_ENCODER_IMPLEM_X264)) {
 		*implem = VENC_ENCODER_IMPLEM_X264;
+		return 0;
+	}
+#endif
+
+#ifdef BUILD_LIBVIDEO_ENCODE_X265
+	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
+	    (*implem == VENC_ENCODER_IMPLEM_X265)) {
+		*implem = VENC_ENCODER_IMPLEM_X265;
 		return 0;
 	}
 #endif

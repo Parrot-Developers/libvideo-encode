@@ -37,6 +37,9 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <video-encode/venc_core.h>
+#include <video-encode/venc_h264.h>
+#include <video-encode/venc_h265.h>
 #include <video-encode/venc_internal.h>
 #include <video-encode/venc_videotoolbox.h>
 
@@ -49,7 +52,6 @@ enum venc_videotoolbox_message_type {
 	VENC_VIDEOTOOLBOX_MESSAGE_TYPE_FLUSH = 'f',
 	VENC_VIDEOTOOLBOX_MESSAGE_TYPE_STOP = 's',
 	VENC_VIDEOTOOLBOX_MESSAGE_TYPE_ERROR = 'e',
-	VENC_VIDEOTOOLBOX_MESSAGE_TYPE_PS = 'p',
 };
 
 
@@ -80,26 +82,8 @@ struct venc_videotoolbox {
 	atomic_bool flush;
 	atomic_bool flushing;
 	atomic_bool flush_discard;
-	atomic_bool ps_set;
 	atomic_bool ps_stored;
-
 	pthread_mutex_t ps_lock;
-	union {
-		struct {
-			uint8_t *sps;
-			size_t sps_size;
-			uint8_t *pps;
-			size_t pps_size;
-		} h264;
-		struct {
-			uint8_t *vps;
-			size_t vps_size;
-			uint8_t *sps;
-			size_t sps_size;
-			uint8_t *pps;
-			size_t pps_size;
-		} h265;
-	};
 
 	struct venc_dyn_config dynconf;
 	unsigned int input_frame_cnt;

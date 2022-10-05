@@ -22,10 +22,12 @@ LOCAL_CONDITIONAL_LIBRARIES := \
 	CONFIG_VENC_FAKEH264:libvideo-encode-fakeh264 \
 	CONFIG_VENC_HISI:libvideo-encode-hisi \
 	CONFIG_VENC_QCOM:libvideo-encode-qcom \
+	CONFIG_VENC_QCOM_JPEG:libvideo-encode-qcom-jpeg \
 	CONFIG_VENC_MEDIACODEC:libvideo-encode-mediacodec \
 	CONFIG_VENC_VIDEOTOOLBOX:libvideo-encode-videotoolbox \
+	CONFIG_VENC_TURBOJPEG:libvideo-encode-turbojpeg \
 	CONFIG_VENC_X264:libvideo-encode-x264 \
-	CONFIG_VENC_TURBOJPEG:libvideo-encode-turbojpeg
+	CONFIG_VENC_X265:libvideo-encode-x265
 LOCAL_EXPORT_LDLIBS := -lvideo-encode-core
 
 include $(BUILD_LIBRARY)
@@ -119,6 +121,31 @@ endif
 
 include $(CLEAR_VARS)
 
+# turbojpeg implementation. can be enabled in the product configuration.
+LOCAL_MODULE := libvideo-encode-turbojpeg
+LOCAL_CATEGORY_PATH := libs
+LOCAL_DESCRIPTION := Video encoding library: turbojpeg implementation
+LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/turbojpeg/include
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_SRC_FILES := \
+	turbojpeg/src/venc_turbojpeg.c
+LOCAL_LIBRARIES := \
+	libfutils \
+	libjpeg-turbo \
+	libmedia-buffers \
+	libmedia-buffers-memory \
+	libmedia-buffers-memory-generic \
+	libpomp \
+	libulog \
+	libvideo-defs \
+	libvideo-encode-core \
+	libvideo-metadata \
+	libvideo-streaming
+
+include $(BUILD_LIBRARY)
+
+include $(CLEAR_VARS)
+
 # x264 implementation. can be enabled in the product configuration.
 LOCAL_MODULE := libvideo-encode-x264
 LOCAL_CATEGORY_PATH := libs
@@ -149,26 +176,34 @@ include $(BUILD_LIBRARY)
 
 include $(CLEAR_VARS)
 
-# turbojpeg implementation. can be enabled in the product configuration.
-LOCAL_MODULE := libvideo-encode-turbojpeg
+# x265 implementation. can be enabled in the product configuration.
+LOCAL_MODULE := libvideo-encode-x265
 LOCAL_CATEGORY_PATH := libs
-LOCAL_DESCRIPTION := Video encoding library: turbojpeg implementation
-LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/turbojpeg/include
+LOCAL_DESCRIPTION := Video encoding library: x265 implementation
+LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/x265/include
 LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_LDLIBS := -ldl
 LOCAL_SRC_FILES := \
-	turbojpeg/src/venc_turbojpeg.c
+	x265/src/venc_x265.c
 LOCAL_LIBRARIES := \
 	libfutils \
-	libjpeg-turbo \
+	libh265 \
+	libpomp \
+	libulog \
 	libmedia-buffers \
 	libmedia-buffers-memory \
 	libmedia-buffers-memory-generic \
-	libpomp \
-	libulog \
 	libvideo-defs \
 	libvideo-encode-core \
 	libvideo-metadata \
-	libvideo-streaming
+	libvideo-streaming \
+	x265
+LOCAL_CONDITIONAL_LIBRARIES := \
+	OPTIONAL:x265-10bit
+
+ifeq ("$(TARGET_OS)","windows")
+  LOCAL_LDLIBS += -lws2_32
+endif
 
 include $(BUILD_LIBRARY)
 

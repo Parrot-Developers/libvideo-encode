@@ -424,12 +424,16 @@ int venc_h264_sei_add_picture_timing(struct h264_ctx *h264, uint64_t timestamp)
 	ULOG_ERRNO_RETURN_ERR_IF(h264 == NULL, EINVAL);
 
 	const struct h264_sps *sps = h264_ctx_get_sps(h264);
+	if (!sps->vui_parameters_present_flag)
+		return -ENOENT;
+
 	if (!sps->vui.nal_hrd_parameters_present_flag &&
 	    !sps->vui.vcl_hrd_parameters_present_flag &&
 	    !sps->vui.pic_struct_present_flag)
 		return -ENOENT;
 
-	if ((sps->vui.time_scale == 0) || (sps->vui.num_units_in_tick == 0))
+	if ((!sps->vui.timing_info_present_flag) ||
+	    (sps->vui.time_scale == 0) || (sps->vui.num_units_in_tick == 0))
 		return -EPROTO;
 
 	uint32_t time_scale = sps->vui.time_scale;

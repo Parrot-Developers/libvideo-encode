@@ -198,6 +198,10 @@ static int encode_frame(struct venc_prog *self)
 	time_get_monotonic(&cur_ts);
 	time_timespec_to_us(&cur_ts, &self->input.frame_info.info.timestamp);
 
+	frame_info.info.capture_timestamp =
+		(uint64_t)frame_info.info.timestamp * 1000000 /
+		frame_info.info.timescale;
+
 	res = mbuf_raw_video_frame_new(&frame_info, &in_frame);
 	if (res < 0) {
 		ULOG_ERRNO("mbuf_raw_video_frame_new:input", -res);
@@ -680,7 +684,7 @@ static void usage(char *prog_name)
 		       "(unused if input is *.y4m)\n"
 	       "  -d | --decimation <factor>           "
 		       "Framerate decimation factor\n"
-	       "  -s | --start <i>                   "
+	       "  -s | --start <i>                     "
 		       "Start encoding at frame index i\n"
 	       "  -n | --count <n>                     "
 		       "Encode at most n frames\n"
@@ -764,6 +768,7 @@ int main(int argc, char **argv)
 	size_t in_capacity;
 	uint64_t start_time = 0, end_time = 0;
 	int use_timer = 0;
+	int auto_implem_by_encoding = 0;
 	unsigned int profile = 0; /* TODO */
 	unsigned int level = 0; /* TODO */
 	enum venc_rate_control rate_control = VENC_RATE_CONTROL_CBR;
@@ -921,6 +926,7 @@ int main(int argc, char **argv)
 				status = EXIT_FAILURE;
 				goto out;
 			}
+			auto_implem_by_encoding = 1;
 			break;
 
 		case 'r':
@@ -1015,6 +1021,11 @@ int main(int argc, char **argv)
 			goto out;
 		}
 	}
+
+	if (auto_implem_by_encoding &&
+	    self->config.implem == VENC_ENCODER_IMPLEM_AUTO)
+		self->config.implem =
+			venc_get_auto_implem_by_encoding(self->config.encoding);
 
 	/* Input file */
 	switch (self->config.implem) {

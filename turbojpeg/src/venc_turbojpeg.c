@@ -32,7 +32,7 @@ ULOG_DECLARE_TAG(ULOG_TAG);
 
 
 #define NB_SUPPORTED_ENCODINGS 1
-#define NB_SUPPORTED_FORMATS 3
+#define NB_SUPPORTED_FORMATS 4
 
 static struct vdef_raw_format supported_formats[NB_SUPPORTED_FORMATS];
 static enum vdef_encoding supported_encodings[NB_SUPPORTED_ENCODINGS];
@@ -42,7 +42,8 @@ static void initialize_supported_formats(void)
 {
 	supported_formats[0] = vdef_i420;
 	supported_formats[1] = vdef_nv12;
-	supported_formats[2] = vdef_gray;
+	supported_formats[2] = vdef_nv21;
+	supported_formats[3] = vdef_gray;
 	supported_encodings[0] = VDEF_ENCODING_MJPEG;
 }
 
@@ -253,10 +254,13 @@ static int encode_frame(struct venc_turbojpeg *self,
 	if (ret < 0)
 		ULOG_ERRNO("mbuf_raw_video_frame_add_ancillary_buffer", -ret);
 
-	if (vdef_raw_format_cmp(&in_info.format, &vdef_nv12)) {
+	if (vdef_raw_format_cmp(&in_info.format, &vdef_nv12) ||
+	    vdef_raw_format_cmp(&in_info.format, &vdef_nv21)) {
 		int i = 0;
 		int width = self->in_picture.stride[1] / 2;
 		int height = self->in_picture.height / 2;
+		int up_offset = 0, vp_offset = 1;
+
 		/* we get the plane containing UV */
 		const unsigned char *plane = self->in_picture.plane[1];
 		self->in_picture.stride[1] = width;
@@ -265,9 +269,14 @@ static int encode_frame(struct venc_turbojpeg *self,
 		v_plane = (uint8_t *)calloc(width * height, sizeof(*v_plane));
 		if (!u_plane || !v_plane)
 			goto out;
+		if (vdef_raw_format_cmp(&in_info.format, &vdef_nv21)) {
+			up_offset = 1;
+			vp_offset = 0;
+		}
+
 		for (i = 0; i < (width * height); i++) {
-			u_plane[i] = plane[2 * i];
-			v_plane[i] = plane[2 * i + 1];
+			u_plane[i] = plane[2 * i + up_offset];
+			v_plane[i] = plane[2 * i + vp_offset];
 		}
 		self->in_picture.plane[1] = (const unsigned char *)u_plane;
 		self->in_picture.plane[2] = (const unsigned char *)v_plane;
@@ -741,9 +750,10 @@ static int create(struct venc_encoder *base)
 	if (vdef_raw_format_cmp(fmt, &vdef_i420)) {
 		self->in_picture.subsamp = TJSAMP_420;
 		self->in_picture.planes = 3;
-	} else if (vdef_raw_format_cmp(fmt, &vdef_nv12)) {
-		/* Since libjpeg-turbo doesn't support NV12, we need to convert
-		 * to I420. */
+	} else if (vdef_raw_format_cmp(fmt, &vdef_nv12) ||
+		   vdef_raw_format_cmp(fmt, &vdef_nv21)) {
+		/* Since libjpeg-turbo doesn't support NV12 and NV21,
+		 * we need to convert to I420. */
 		self->in_picture.subsamp = TJSAMP_420;
 		self->in_picture.planes = 2;
 	} else if (vdef_raw_format_cmp(fmt, &vdef_gray)) {

@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2017 Parrot Drones SAS
+ * Copyright (c) 2021 Parrot Drones SAS
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -24,71 +24,31 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _VENC_PRIV_H_
-#define _VENC_PRIV_H_
+#ifndef _VENC_X265_PRIV_H_
+#define _VENC_X265_PRIV_H_
 
-#ifndef _GNU_SOURCE
-#	define _GNU_SOURCE
-#endif
-
-#include <errno.h>
-#include <inttypes.h>
 #include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include <stdatomic.h>
+#include <stdbool.h>
+#include <x265.h>
 
 #include <futils/futils.h>
-#include <h264/h264.h>
-#include <h265/h265.h>
-#include <video-encode/venc.h>
-#include <video-encode/venc_h264.h>
+#include <libpomp.h>
+#include <media-buffers/mbuf_coded_video_frame.h>
+#include <media-buffers/mbuf_mem.h>
+#include <media-buffers/mbuf_mem_generic.h>
+#include <media-buffers/mbuf_raw_video_frame.h>
+#include <video-encode/venc_core.h>
 #include <video-encode/venc_h265.h>
 #include <video-encode/venc_internal.h>
-#include <video-streaming/vstrm.h>
+#include <video-encode/venc_x265.h>
 
+#define VENC_X265_LEVEL_5_1 51
+#define VENC_X265_OUT_POOL_DEFAULT_MIN_BUF_COUNT 10
 
-#define VENC_H264_MAIN_PROFILE 77
-#define VENC_H264_LEVEL_4_0 40
-#define VENC_DEFAULT_GOP_LENGTH_SEC 1.f
+#define VENC_MSG_FLUSH 'f'
+#define VENC_MSG_STOP 's'
 
-#define VENC_H265_MAIN_PROFILE 1
-#define VENC_H265_LEVEL_4_0 40
-
-#ifdef BUILD_LIBVIDEO_ENCODE_X264
-#	include <video-encode/venc_x264.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_X265
-#	include <video-encode/venc_x265.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_HISI
-#	include <video-encode/venc_hisi.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_QCOM
-#	include <video-encode/venc_qcom.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_QCOM_JPEG
-#	include <video-encode/venc_qcom_jpeg.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_MEDIACODEC
-#	include <video-encode/venc_mediacodec.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_FAKEH264
-#	include <video-encode/venc_fakeh264.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_VIDEOTOOLBOX
-#	include <video-encode/venc_videotoolbox.h>
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_TURBOJPEG
-#	include <video-encode/venc_turbojpeg.h>
-#endif
 
 static inline void xfree(void **ptr)
 {
@@ -98,11 +58,32 @@ static inline void xfree(void **ptr)
 	}
 }
 
+struct venc_x265 {
+	struct venc_encoder *base;
+	struct mbuf_raw_video_frame_queue *in_queue;
+	struct mbuf_raw_video_frame_queue *enc_in_queue;
+	struct mbuf_coded_video_frame_queue *enc_out_queue;
+	struct pomp_evt *enc_out_queue_evt;
+	const x265_api *api;
+	x265_encoder *x265;
+	x265_picture in_picture;
+	unsigned int x265_pts;
+	struct vdef_coded_format output_format;
+	unsigned int input_frame_cnt;
+	uint8_t *dummy_uv_plane;
+	size_t dummy_uv_plane_len;
+	size_t dummy_uv_plane_stride;
 
-static inline char *xstrdup(const char *s)
-{
-	return s == NULL ? NULL : strdup(s);
-}
+	struct h265_reader *h265_reader;
+	bool recovery_point;
+	pthread_t thread;
+	bool thread_launched;
+	atomic_bool insert_idr;
+	atomic_bool should_stop;
+	atomic_bool flushing;
+	atomic_bool flush_discard;
+	struct mbox *mbox;
+};
 
 
-#endif /* !_VENC_PRIV_H_ */
+#endif /* !_VENC_X265_PRIV_H_ */
