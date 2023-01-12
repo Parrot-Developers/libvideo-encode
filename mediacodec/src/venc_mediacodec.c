@@ -1038,6 +1038,7 @@ static void pull_frame(struct venc_mediacodec *self,
 
 		struct vdef_nalu nalu = {
 			.size = q - p,
+			.importance = 0,
 		};
 		switch (self->base->config.encoding) {
 		case VDEF_ENCODING_H264:

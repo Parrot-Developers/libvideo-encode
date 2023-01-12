@@ -214,7 +214,7 @@ static int add_x264_nalus(struct mbuf_coded_video_frame *out_frame,
 	size_t nalu_offset = 4;
 	size_t nalu_len = 0;
 	size_t offset = 0, base_offset;
-	struct vdef_nalu out_nalu;
+	struct vdef_nalu out_nalu = {0};
 
 	for (i = 0; i < nalu_count; i++)
 		mem_size += nalu[i].i_payload - nalu[i].i_padding;
@@ -242,6 +242,7 @@ static int add_x264_nalus(struct mbuf_coded_video_frame *out_frame,
 
 		base_offset = offset;
 		out_nalu.size = 0;
+		out_nalu.importance = 0;
 		nalu_len = nalu[i].i_payload - nalu[i].i_padding - nalu_offset;
 		if (out_info->format.data_format ==
 		    VDEF_CODED_DATA_FORMAT_BYTE_STREAM) {

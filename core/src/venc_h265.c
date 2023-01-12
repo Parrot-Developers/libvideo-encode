@@ -113,6 +113,7 @@ int venc_h265_writer_new(const uint8_t *vps,
 	*ret_obj = h265;
 	free(_vps);
 	free(_sps);
+	h265_pps_clear(_pps);
 	free(_pps);
 	return 0;
 
@@ -120,6 +121,7 @@ error:
 	venc_h265_writer_destroy(h265);
 	free(_vps);
 	free(_sps);
+	h265_pps_clear(_pps);
 	free(_pps);
 	return res;
 }
@@ -146,7 +148,7 @@ int venc_h265_aud_write(struct h265_ctx *h265,
 			struct mbuf_coded_video_frame *frame)
 {
 	int res = 0, err;
-	struct vdef_nalu nalu;
+	struct vdef_nalu nalu = {0};
 	size_t size, len;
 	uint8_t *data, *start;
 	void *void_data;
@@ -242,6 +244,7 @@ int venc_h265_aud_write(struct h265_ctx *h265,
 	size += bs.off;
 	nalu.h265.type = H265_NALU_TYPE_AUD_NUT;
 	nalu.size = size;
+	nalu.importance = 0;
 
 	res = mbuf_coded_video_frame_add_nalu(frame, mem, 0, &nalu);
 	if (res < 0) {
@@ -269,7 +272,7 @@ int venc_h265_ps_copy(struct h265_ctx *h265,
 {
 	int res = 0, err;
 	uint32_t sz, start_code = htonl(0x00000001);
-	struct vdef_nalu vps_nalu, sps_nalu, pps_nalu;
+	struct vdef_nalu vps_nalu = {0}, sps_nalu = {0}, pps_nalu = {0};
 	size_t size, len;
 	uint8_t *vps_data, *sps_data, *pps_data;
 	void *void_data;
@@ -333,6 +336,7 @@ int venc_h265_ps_copy(struct h265_ctx *h265,
 	size += vps_size;
 	vps_nalu.h265.type = H265_NALU_TYPE_VPS_NUT;
 	vps_nalu.size = size;
+	vps_nalu.importance = 0;
 
 	res = mbuf_coded_video_frame_add_nalu(frame, vps_mem, 0, &vps_nalu);
 	if (res < 0) {
@@ -382,6 +386,7 @@ int venc_h265_ps_copy(struct h265_ctx *h265,
 	size += sps_size;
 	sps_nalu.h265.type = H265_NALU_TYPE_SPS_NUT;
 	sps_nalu.size = size;
+	sps_nalu.importance = 0;
 
 	res = mbuf_coded_video_frame_add_nalu(frame, sps_mem, 0, &sps_nalu);
 	if (res < 0) {
@@ -431,6 +436,7 @@ int venc_h265_ps_copy(struct h265_ctx *h265,
 	size += pps_size;
 	pps_nalu.h265.type = H265_NALU_TYPE_PPS_NUT;
 	pps_nalu.size = size;
+	pps_nalu.importance = 0;
 
 	res = mbuf_coded_video_frame_add_nalu(frame, pps_mem, 0, &pps_nalu);
 	if (res < 0) {
@@ -661,7 +667,7 @@ int venc_h265_sei_write(struct h265_ctx *h265,
 			struct mbuf_coded_video_frame *frame)
 {
 	int res, count, err;
-	struct vdef_nalu nalu;
+	struct vdef_nalu nalu = {0};
 	struct mbuf_mem *mem = NULL;
 	void *void_data;
 	uint8_t *data, *start;
@@ -746,6 +752,7 @@ int venc_h265_sei_write(struct h265_ctx *h265,
 	size += bs.off;
 	nalu.h265.type = H265_NALU_TYPE_PREFIX_SEI_NUT;
 	nalu.size = size;
+	nalu.importance = 0;
 
 	res = mbuf_coded_video_frame_add_nalu(frame, mem, 0, &nalu);
 	if (res < 0) {
@@ -913,7 +920,7 @@ int venc_h265_format_convert(struct mbuf_coded_video_frame *frame,
 	uint8_t *data;
 	uint32_t start_code = htonl(0x00000001);
 	const void *nalu_data;
-	struct vdef_nalu nalu;
+	struct vdef_nalu nalu = {0};
 	int nalu_count;
 	struct vdef_coded_frame info;
 	const struct vdef_coded_format *current_format;

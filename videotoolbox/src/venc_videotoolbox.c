@@ -470,6 +470,7 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 		}
 
 		out_nalu.size = nalu_len + 4;
+		out_nalu.importance = 0;
 		ret = mbuf_coded_video_frame_add_nalu(
 			*out_frame, mem, offset, &out_nalu);
 		if (ret < 0) {

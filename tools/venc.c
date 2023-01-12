@@ -462,15 +462,18 @@ static int frame_output(struct venc_prog *self,
 
 			switch (self->output.encoding) {
 			case VDEF_ENCODING_H264:
-				ULOGD("-- NALU type=%s size=%zu mb_count=%d",
+				ULOGD("-- NALU type=%s size=%zu importance=%u "
+				      "mb_count=%d",
 				      h264_nalu_type_str(nalu.h264.type),
 				      nalu.size,
+				      nalu.importance,
 				      nalu.h264.slice_mb_count);
 				break;
 			case VDEF_ENCODING_H265:
-				ULOGD("-- NALU type=%s size=%zu",
+				ULOGD("-- NALU type=%s size=%zu importance=%u",
 				      h265_nalu_type_str(nalu.h265.type),
-				      nalu.size);
+				      nalu.size,
+				      nalu.importance);
 				break;
 			default:
 				break;

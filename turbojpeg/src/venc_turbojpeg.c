@@ -47,16 +47,18 @@ static void initialize_supported_formats(void)
 	supported_encodings[0] = VDEF_ENCODING_MJPEG;
 }
 
-static void flush_complete(struct venc_turbojpeg *self)
+static void call_flush_done(void *userdata)
 {
-	/* Call the flush callback if defined */
+	struct venc_turbojpeg *self = userdata;
+
 	if (self->base->cbs.flush)
 		self->base->cbs.flush(self->base, self->base->userdata);
 }
 
-static void stop_complete(struct venc_turbojpeg *self)
+static void call_stop_done(void *userdata)
 {
-	/* Call the stop callback if defined */
+	struct venc_turbojpeg *self = userdata;
+
 	if (self->base->cbs.stop)
 		self->base->cbs.stop(self->base, self->base->userdata);
 }
@@ -64,7 +66,7 @@ static void stop_complete(struct venc_turbojpeg *self)
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct venc_turbojpeg *self = userdata;
-	int ret;
+	int ret, err;
 	char message;
 
 	do {
@@ -78,10 +80,20 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 
 		switch (message) {
 		case VENC_MSG_FLUSH:
-			flush_complete(self);
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_flush_done, self, self);
+			if (err < 0) {
+				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					   -err);
+			}
 			break;
 		case VENC_MSG_STOP:
-			stop_complete(self);
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_stop_done, self, self);
+			if (err < 0) {
+				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					   -err);
+			}
 			break;
 		default:
 			ULOGE("unknown message: %c", message);
@@ -119,7 +131,7 @@ static int fill_frame(struct venc_turbojpeg *self,
 {
 	int ret = 0;
 	struct vmeta_frame *metadata = NULL;
-	struct vdef_nalu nalu;
+	struct vdef_nalu nalu = {0};
 	void *nalu_data;
 	struct mbuf_mem *mem = NULL;
 
@@ -156,6 +168,7 @@ static int fill_frame(struct venc_turbojpeg *self,
 		ULOG_ERRNO("mbuf_mem_get_data", -ret);
 		goto out;
 	}
+	nalu.importance = 0;
 
 	memcpy(nalu_data, out_picture, out_picture_size);
 	ret = mbuf_coded_video_frame_add_nalu(out_frame, mem, 0, &nalu);
@@ -634,6 +647,10 @@ static int destroy(struct venc_encoder *base)
 		if (err < 0)
 			ULOGE("%s", tjGetErrorStr());
 	}
+
+	err = pomp_loop_idle_remove_by_cookie(base->loop, self);
+	if (err < 0)
+		ULOG_ERRNO("pomp_loop_idle_remove_by_cookie", -err);
 
 	self->in_picture.plane[0] = NULL;
 	self->in_picture.plane[1] = NULL;

@@ -122,7 +122,7 @@ int venc_h264_aud_write(struct h264_ctx *h264,
 			struct mbuf_coded_video_frame *frame)
 {
 	int res = 0, err;
-	struct vdef_nalu nalu;
+	struct vdef_nalu nalu = {0};
 	size_t size, len;
 	uint8_t *data, *start;
 	void *void_data;
@@ -219,6 +219,7 @@ int venc_h264_aud_write(struct h264_ctx *h264,
 	nalu.h264.slice_type = H264_SLICE_TYPE_UNKNOWN;
 	nalu.h264.slice_mb_count = 0;
 	nalu.size = size;
+	nalu.importance = 0;
 
 	res = mbuf_coded_video_frame_add_nalu(frame, mem, 0, &nalu);
 	if (res < 0) {
@@ -244,7 +245,7 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 {
 	int res = 0, err;
 	uint32_t sz, start_code = htonl(0x00000001);
-	struct vdef_nalu sps_nalu, pps_nalu;
+	struct vdef_nalu sps_nalu = {0}, pps_nalu = {0};
 	size_t size, len;
 	uint8_t *sps_data, *pps_data;
 	void *void_data;
@@ -308,6 +309,7 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 	sps_nalu.h264.slice_type = H264_SLICE_TYPE_UNKNOWN;
 	sps_nalu.h264.slice_mb_count = 0;
 	sps_nalu.size = size;
+	sps_nalu.importance = 0;
 
 	res = mbuf_coded_video_frame_add_nalu(frame, sps_mem, 0, &sps_nalu);
 	if (res < 0) {
@@ -359,6 +361,7 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 	pps_nalu.h264.slice_type = H264_SLICE_TYPE_UNKNOWN;
 	pps_nalu.h264.slice_mb_count = 0;
 	pps_nalu.size = size;
+	pps_nalu.importance = 0;
 
 	res = mbuf_coded_video_frame_add_nalu(frame, pps_mem, 0, &pps_nalu);
 	if (res < 0) {
@@ -614,7 +617,7 @@ int venc_h264_sei_write(struct h264_ctx *h264,
 			struct mbuf_coded_video_frame *frame)
 {
 	int res, count, err;
-	struct vdef_nalu nalu;
+	struct vdef_nalu nalu = {0};
 	struct mbuf_mem *mem = NULL;
 	void *void_data;
 	uint8_t *data, *start;
@@ -698,6 +701,7 @@ int venc_h264_sei_write(struct h264_ctx *h264,
 	nalu.h264.slice_type = H264_SLICE_TYPE_UNKNOWN;
 	nalu.h264.slice_mb_count = 0;
 	nalu.size = size;
+	nalu.importance = 0;
 
 	res = mbuf_coded_video_frame_add_nalu(frame, mem, 0, &nalu);
 	if (res < 0) {
@@ -834,7 +838,7 @@ int venc_h264_format_convert(struct mbuf_coded_video_frame *frame,
 	uint8_t *data;
 	uint32_t start_code = htonl(0x00000001);
 	const void *nalu_data;
-	struct vdef_nalu nalu;
+	struct vdef_nalu nalu = {0};
 	int nalu_count;
 	struct vdef_coded_frame info;
 	const struct vdef_coded_format *current_format;
