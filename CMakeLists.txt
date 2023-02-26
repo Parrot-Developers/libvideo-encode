@@ -9,6 +9,10 @@ set(LIB_SOURCES
 )
 
 add_library(video-encode ${LIB_SOURCES})
+set_target_properties(video-encode PROPERTIES
+                    POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
+)
+
 
 target_include_directories(video-encode PUBLIC
                             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -29,6 +33,10 @@ set(LIB_SOURCES
 )
 
 add_library(video-encode-core ${LIB_SOURCES})
+
+set_target_properties(video-encode-core PROPERTIES
+                    POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
+)
 
 target_include_directories(video-encode-core PUBLIC
                             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/core/include>
