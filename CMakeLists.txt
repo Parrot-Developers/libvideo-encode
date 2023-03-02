@@ -10,6 +10,11 @@ set(LIB_SOURCES
 
 add_library(${PROJECT_NAME} ${LIB_SOURCES})
 
+set_target_properties(${PROJECT_NAME} PROPERTIES
+                    POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
+)
+
+
 target_include_directories(${PROJECT_NAME} PUBLIC
                             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
                             $<INSTALL_INTERFACE:include>
@@ -44,13 +49,20 @@ set(LIB_SOURCES
     core/src/venc_h264.c
     core/src/venc_h265.c
     )
-
 add_library(${PROJECT_NAME}-core ${LIB_SOURCES})
-
 target_include_directories(${PROJECT_NAME}-core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/core/include>
     $<INSTALL_INTERFACE:include>
     )
+
+set_target_properties(${PROJECT_NAME}-core PROPERTIES
+                    POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
+)
+
+target_include_directories(video-encode-core PUBLIC
+                            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/core/include>
+                            $<INSTALL_INTERFACE:include>
+)
 
 target_compile_definitions(${PROJECT_NAME}-core PRIVATE "VENC_API_EXPORTS")
 target_compile_options(${PROJECT_NAME}-core PRIVATE "-fvisibility=hidden")
