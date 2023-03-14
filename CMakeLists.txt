@@ -8,7 +8,7 @@ set(LIB_SOURCES
         src/venc.c
 )
 
-add_library(${PROJECT_NAME} ${LIB_SOURCES})
+add_library(${PROJECT_NAME} SHARED ${LIB_SOURCES})
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
                     POSITION_INDEPENDENT_CODE ${BUILD_SHARED_LIBS}
@@ -49,7 +49,7 @@ set(LIB_SOURCES
     core/src/venc_h264.c
     core/src/venc_h265.c
     )
-add_library(${PROJECT_NAME}-core ${LIB_SOURCES})
+add_library(${PROJECT_NAME}-core SHARED ${LIB_SOURCES})
 target_include_directories(${PROJECT_NAME}-core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/core/include>
     $<INSTALL_INTERFACE:include>
