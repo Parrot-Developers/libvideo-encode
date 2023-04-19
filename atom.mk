@@ -8,7 +8,7 @@ LOCAL_MODULE := libvideo-encode
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video encoding library
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/include
-LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
 LOCAL_SRC_FILES := \
 	src/venc.c
 LOCAL_LIBRARIES := \
@@ -40,7 +40,7 @@ LOCAL_MODULE := libvideo-encode-core
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video encoding library: core files
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/core/include
-LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
 LOCAL_SRC_FILES := \
 	core/src/venc_core.c \
 	core/src/venc_h264.c \

@@ -31,6 +31,50 @@ ULOG_DECLARE_TAG(venc);
 #include "venc_priv.h"
 
 
+/* Put preferred implementation first for autoselection */
+static const enum venc_encoder_implem supported_implems[] = {
+#ifdef BUILD_LIBVIDEO_ENCODE_HISI
+	VENC_ENCODER_IMPLEM_HISI,
+#endif
+
+#ifdef BUILD_LIBVIDEO_ENCODE_QCOM
+	VENC_ENCODER_IMPLEM_QCOM,
+#endif
+
+#ifdef BUILD_LIBVIDEO_ENCODE_QCOM_JPEG
+	VENC_ENCODER_IMPLEM_QCOM_JPEG,
+#endif
+
+#ifdef BUILD_LIBVIDEO_ENCODE_MEDIACODEC
+	VENC_ENCODER_IMPLEM_MEDIACODEC,
+#endif
+
+#ifdef BUILD_LIBVIDEO_ENCODE_VIDEOTOOLBOX
+	VENC_ENCODER_IMPLEM_VIDEOTOOLBOX,
+#endif
+
+#ifdef BUILD_LIBVIDEO_ENCODE_X264
+	VENC_ENCODER_IMPLEM_X264,
+#endif
+
+#ifdef BUILD_LIBVIDEO_ENCODE_X265
+	VENC_ENCODER_IMPLEM_X265,
+#endif
+
+#ifdef BUILD_LIBVIDEO_ENCODE_FAKEH264
+	VENC_ENCODER_IMPLEM_FAKEH264,
+#endif
+
+#ifdef BUILD_LIBVIDEO_ENCODE_TURBOJPEG
+	VENC_ENCODER_IMPLEM_TURBOJPEG,
+#endif
+};
+
+
+static const int supported_implems_count =
+	sizeof(supported_implems) / sizeof(supported_implems[0]);
+
+
 static const struct venc_ops *implem_ops(enum venc_encoder_implem implem)
 {
 	switch (implem) {
@@ -79,83 +123,30 @@ static const struct venc_ops *implem_ops(enum venc_encoder_implem implem)
 static int venc_get_implem(enum venc_encoder_implem *implem)
 {
 	ULOG_ERRNO_RETURN_ERR_IF(implem == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(!supported_implems_count, ENOSYS);
 
-	/* Put preferred implementation first for autoselection */
-
-#ifdef BUILD_LIBVIDEO_ENCODE_HISI
-	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
-	    (*implem == VENC_ENCODER_IMPLEM_HISI)) {
-		*implem = VENC_ENCODER_IMPLEM_HISI;
+	if (*implem == VENC_ENCODER_IMPLEM_AUTO) {
+		*implem = supported_implems[0];
 		return 0;
 	}
-#endif
 
-#ifdef BUILD_LIBVIDEO_ENCODE_QCOM
-	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
-	    (*implem == VENC_ENCODER_IMPLEM_QCOM)) {
-		*implem = VENC_ENCODER_IMPLEM_QCOM;
-		return 0;
-	}
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_QCOM_JPEG
-	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
-	    (*implem == VENC_ENCODER_IMPLEM_QCOM_JPEG)) {
-		*implem = VENC_ENCODER_IMPLEM_QCOM_JPEG;
-		return 0;
-	}
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_MEDIACODEC
-	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
-	    (*implem == VENC_ENCODER_IMPLEM_MEDIACODEC)) {
-		*implem = VENC_ENCODER_IMPLEM_MEDIACODEC;
-		return 0;
-	}
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_VIDEOTOOLBOX
-	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
-	    (*implem == VENC_ENCODER_IMPLEM_VIDEOTOOLBOX)) {
-		*implem = VENC_ENCODER_IMPLEM_VIDEOTOOLBOX;
-		return 0;
-	}
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_X264
-	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
-	    (*implem == VENC_ENCODER_IMPLEM_X264)) {
-		*implem = VENC_ENCODER_IMPLEM_X264;
-		return 0;
-	}
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_X265
-	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
-	    (*implem == VENC_ENCODER_IMPLEM_X265)) {
-		*implem = VENC_ENCODER_IMPLEM_X265;
-		return 0;
-	}
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_FAKEH264
-	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
-	    (*implem == VENC_ENCODER_IMPLEM_FAKEH264)) {
-		*implem = VENC_ENCODER_IMPLEM_FAKEH264;
-		return 0;
-	}
-#endif
-
-#ifdef BUILD_LIBVIDEO_ENCODE_TURBOJPEG
-	if ((*implem == VENC_ENCODER_IMPLEM_AUTO) ||
-	    (*implem == VENC_ENCODER_IMPLEM_TURBOJPEG)) {
-		*implem = VENC_ENCODER_IMPLEM_TURBOJPEG;
-		return 0;
-	}
-#endif
+	for (int i = 0; i < supported_implems_count; i++)
+		if (*implem == supported_implems[i])
+			return 0;
 
 	/* No suitable implementation found */
 	return -ENOSYS;
+}
+
+
+int venc_get_supported_implems(const enum venc_encoder_implem **implems)
+{
+	ULOG_ERRNO_RETURN_ERR_IF(!implems, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(!supported_implems_count, ENOSYS);
+
+	*implems = supported_implems;
+
+	return supported_implems_count;
 }
 
 
@@ -202,25 +193,67 @@ enum venc_encoder_implem venc_get_auto_implem(void)
 enum venc_encoder_implem
 venc_get_auto_implem_by_encoding(enum vdef_encoding encoding)
 {
-	int res = 0;
+	int res;
 	const enum vdef_encoding *encodings;
 
-	ULOG_ERRNO_RETURN_ERR_IF(!encoding, EINVAL);
+	ULOG_ERRNO_RETURN_VAL_IF(encoding == VDEF_ENCODING_UNKNOWN,
+				 EINVAL,
+				 VENC_ENCODER_IMPLEM_AUTO);
+	ULOG_ERRNO_RETURN_VAL_IF(
+		!supported_implems_count, ENOSYS, VENC_ENCODER_IMPLEM_AUTO);
 
-	for (enum venc_encoder_implem implem = VENC_ENCODER_IMPLEM_AUTO + 1;
-	     implem < VENC_ENCODER_IMPLEM_MAX;
-	     implem++) {
-
-		res = venc_get_implem(&implem);
-		if (res < 0)
-			continue;
+	for (int i = 0; i < supported_implems_count; i++) {
+		enum venc_encoder_implem implem = supported_implems[i];
 
 		res = implem_ops(implem)->get_supported_encodings(&encodings);
 		if (res < 0)
 			continue;
 
-		for (int i = 0; i < res; i++) {
-			if (encodings[i] == encoding)
+		for (int j = 0; j < res; j++) {
+			if (encodings[j] == encoding)
+				return implem;
+		}
+	}
+
+	return VENC_ENCODER_IMPLEM_AUTO;
+}
+
+
+enum venc_encoder_implem venc_get_auto_implem_by_encoding_and_format(
+	enum vdef_encoding encoding,
+	const struct vdef_raw_format *format)
+{
+	int res;
+	const enum vdef_encoding *encodings;
+	const struct vdef_raw_format *supported_formats;
+
+	ULOG_ERRNO_RETURN_VAL_IF(encoding == VDEF_ENCODING_UNKNOWN,
+				 EINVAL,
+				 VENC_ENCODER_IMPLEM_AUTO);
+	ULOG_ERRNO_RETURN_VAL_IF(!format, EINVAL, VENC_ENCODER_IMPLEM_AUTO);
+	ULOG_ERRNO_RETURN_VAL_IF(
+		!supported_implems_count, ENOSYS, VENC_ENCODER_IMPLEM_AUTO);
+
+	for (int i = 0; i < supported_implems_count; i++) {
+		enum venc_encoder_implem implem = supported_implems[i];
+
+		res = implem_ops(implem)->get_supported_encodings(&encodings);
+		if (res < 0)
+			continue;
+
+		bool encoding_supported = false;
+		for (int j = 0; j < res && !encoding_supported; j++) {
+			if (encodings[j] == encoding)
+				encoding_supported = true;
+		}
+
+		if (encoding_supported) {
+			res = implem_ops(implem)->get_supported_input_formats(
+				&supported_formats);
+			if (res < 0)
+				continue;
+			if (vdef_raw_format_intersect(
+				    format, supported_formats, res))
 				return implem;
 		}
 	}

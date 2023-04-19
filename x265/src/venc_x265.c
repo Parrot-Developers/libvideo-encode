@@ -46,17 +46,19 @@ static void initialize_supported_formats(void)
 }
 
 
-static void flush_complete(struct venc_x265 *self)
+static void call_flush_done(void *userdata)
 {
-	/* Call the flush callback if defined */
+	struct venc_x265 *self = userdata;
+
 	if (self->base->cbs.flush)
 		self->base->cbs.flush(self->base, self->base->userdata);
 }
 
 
-static void stop_complete(struct venc_x265 *self)
+static void call_stop_done(void *userdata)
 {
-	/* Call the stop callback if defined */
+	struct venc_x265 *self = userdata;
+
 	if (self->base->cbs.stop)
 		self->base->cbs.stop(self->base, self->base->userdata);
 }
@@ -65,7 +67,7 @@ static void stop_complete(struct venc_x265 *self)
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct venc_x265 *self = userdata;
-	int ret;
+	int ret, err;
 	char message;
 
 	do {
@@ -79,11 +81,19 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 
 		switch (message) {
 		case VENC_MSG_FLUSH:
-			flush_complete(self);
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_flush_done, self, self);
+			if (err < 0)
+				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					   -err);
 			break;
 		case VENC_MSG_STOP:
-			stop_complete(self);
-			return;
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_stop_done, self, self);
+			if (err < 0)
+				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					   -err);
+			break;
 		default:
 			ULOGE("unknown message: %c", message);
 			break;
@@ -96,22 +106,34 @@ static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 {
 	struct venc_x265 *self = userdata;
 	struct mbuf_coded_video_frame *out_frame = NULL;
-	int ret;
+	int err;
 
 	do {
-		ret = mbuf_coded_video_frame_queue_pop(self->enc_out_queue,
+		err = mbuf_coded_video_frame_queue_pop(self->enc_out_queue,
 						       &out_frame);
-		if (ret == -EAGAIN) {
+		if (err == -EAGAIN) {
 			return;
-		} else if (ret < 0) {
+		} else if (err < 0) {
 			ULOG_ERRNO("mbuf_coded_video_frame_queue_pop:enc_out",
-				   -ret);
+				   -err);
 			return;
 		}
-		self->base->cbs.frame_output(
-			self->base, 0, out_frame, self->base->userdata);
+
+		struct vdef_coded_frame out_info = {};
+		err = mbuf_coded_video_frame_get_frame_info(out_frame,
+							    &out_info);
+		if (err < 0)
+			ULOG_ERRNO("mbuf_coded_video_frame_get_frame_info",
+				   -err);
+
+		if (!atomic_load(&self->flush_discard))
+			self->base->cbs.frame_output(
+				self->base, 0, out_frame, self->base->userdata);
+		else
+			ULOGD("discarding frame %d", out_info.info.index);
+
 		mbuf_coded_video_frame_unref(out_frame);
-	} while (ret == 0);
+	} while (err == 0);
 }
 
 
@@ -936,6 +958,11 @@ static int destroy(struct venc_encoder *base)
 	if (self->api != NULL)
 		self->api->cleanup();
 	free(self->dummy_uv_plane);
+
+	err = pomp_loop_idle_remove_by_cookie(base->loop, self);
+	if (err < 0)
+		ULOG_ERRNO("pomp_loop_idle_remove_by_cookie", -err);
+
 	free(self);
 	base->derived = NULL;
 

@@ -27,10 +27,6 @@
 #ifndef _VENC_PRIV_H_
 #define _VENC_PRIV_H_
 
-#ifndef _GNU_SOURCE
-#	define _GNU_SOURCE
-#endif
-
 #include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>

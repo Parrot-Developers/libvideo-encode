@@ -52,6 +52,19 @@ extern "C" {
 #	define VENC_API
 #endif /* !VENC_API_EXPORTS */
 
+
+/**
+ * Get the supported implementations.
+ * The returned implementations array is a static array whose size is the return
+ * value of this function. If this function returns an error (negative errno),
+ * then the value of *implems is undefined.
+ * @param implems: pointer to an array of implems (output)
+ * @return the size of the implems array, or a negative errno on error.
+ */
+VENC_API int
+venc_get_supported_implems(const enum venc_encoder_implem **implems);
+
+
 /**
  * Get the supported encodings for the given encoder implementation.
  * Each implementation supports at least one encoding, and optionally more.
@@ -95,11 +108,24 @@ VENC_API enum venc_encoder_implem venc_get_auto_implem(void);
 /**
  * Get the implementation that supports the required encodings.
  * @param encoding: encoding to support
- * @return the encoder implementation, or VENC_ENCODER_IMPLEM_AUTO in
+ * @return an encoder implementation, or VENC_ENCODER_IMPLEM_AUTO in
  * case of error
  */
 VENC_API enum venc_encoder_implem
 venc_get_auto_implem_by_encoding(enum vdef_encoding encoding);
+
+
+/**
+ * Get the implementation that supports the required encoding and input format.
+ * @param encoding: encoding to support
+ * @param format: pointer to an input format
+ * @return an encoder implementation, or VENC_ENCODER_IMPLEM_AUTO in
+ * case of error
+ */
+VENC_API enum venc_encoder_implem venc_get_auto_implem_by_encoding_and_format(
+	enum vdef_encoding encoding,
+	const struct vdef_raw_format *format);
+
 
 /**
  * Create an encoder instance.
