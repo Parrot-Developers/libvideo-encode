@@ -51,6 +51,11 @@ extern "C" {
 #endif /* !VENC_API_EXPORTS */
 
 
+VENC_API uint32_t
+venc_h265_get_nalu_importance(enum h265_nalu_type type,
+			      enum vdef_coded_frame_type frame_type);
+
+
 VENC_API int venc_h265_writer_new(const uint8_t *vps,
 				  size_t vps_size,
 				  const uint8_t *sps,
@@ -61,6 +66,9 @@ VENC_API int venc_h265_writer_new(const uint8_t *vps,
 
 
 VENC_API int venc_h265_writer_destroy(struct h265_ctx *h265);
+
+
+VENC_API int venc_h265_patch_ps(struct venc_encoder *self);
 
 
 VENC_API int venc_h265_aud_write(struct h265_ctx *h265,

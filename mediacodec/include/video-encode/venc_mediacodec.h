@@ -45,6 +45,16 @@ extern "C" {
 #endif /* !VENC_API_EXPORTS */
 
 
+struct venc_config_mediacodec {
+	/* Encoder implementation for this extension.
+	 * Keep this field for compatibility with 'struct venc_config_impl' */
+	enum venc_encoder_implem implem;
+
+	/* Opaque pointer to a native window for direct input to the encoder */
+	void *surface;
+};
+
+
 extern VENC_API const struct venc_ops venc_mediacodec_ops;
 
 

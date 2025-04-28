@@ -68,11 +68,29 @@ static const enum venc_encoder_implem supported_implems[] = {
 #ifdef BUILD_LIBVIDEO_ENCODE_TURBOJPEG
 	VENC_ENCODER_IMPLEM_TURBOJPEG,
 #endif
+
+#ifdef BUILD_LIBVIDEO_ENCODE_PNG
+	VENC_ENCODER_IMPLEM_PNG,
+#endif
 };
+
+
+/* Forward declaration */
+static int venc_config_free_allocated(struct venc_config *config);
 
 
 static const int supported_implems_count =
 	sizeof(supported_implems) / sizeof(supported_implems[0]);
+
+
+static atomic_int s_instance_counter;
+
+
+static pthread_once_t instance_counter_is_init = PTHREAD_ONCE_INIT;
+static void initialize_instance_counter(void)
+{
+	atomic_init(&s_instance_counter, 0);
+}
 
 
 static const struct venc_ops *implem_ops(enum venc_encoder_implem implem)
@@ -113,6 +131,10 @@ static const struct venc_ops *implem_ops(enum venc_encoder_implem implem)
 #ifdef BUILD_LIBVIDEO_ENCODE_FAKEH264
 	case VENC_ENCODER_IMPLEM_FAKEH264:
 		return &venc_fakeh264_ops;
+#endif
+#ifdef BUILD_LIBVIDEO_ENCODE_PNG
+	case VENC_ENCODER_IMPLEM_PNG:
+		return &venc_png_ops;
 #endif
 	default:
 		return NULL;
@@ -262,6 +284,135 @@ enum venc_encoder_implem venc_get_auto_implem_by_encoding_and_format(
 }
 
 
+static int venc_config_copy_allocated(const struct venc_config *config,
+				      struct venc_config *copy)
+{
+	int ret;
+	enum venc_encoder_implem implem;
+	const struct venc_ops *ops = NULL;
+	struct venc_config_impl *impl_cfg = NULL;
+
+	implem = config->implem;
+
+	ret = venc_get_implem(&implem);
+	ULOG_ERRNO_RETURN_ERR_IF(ret < 0, -ret);
+
+	ops = implem_ops(implem);
+	ULOG_ERRNO_RETURN_ERR_IF(ops == NULL, ENOSYS);
+
+	if (config->implem_cfg != NULL) {
+		ULOG_ERRNO_RETURN_ERR_IF((ops->copy_implem_cfg == NULL),
+					 ENOSYS);
+		ULOG_ERRNO_RETURN_ERR_IF((ops->free_implem_cfg == NULL),
+					 ENOSYS);
+	}
+
+	/* Deep copy config */
+	*copy = *config;
+	copy->name = xstrdup(config->name);
+	copy->device = xstrdup(config->device);
+	copy->implem_cfg = NULL;
+
+	/* Handle implem specific */
+	if (config->implem_cfg != NULL) {
+		impl_cfg = venc_config_get_specific(config, implem);
+		if (impl_cfg == NULL) {
+			ret = -EPROTO;
+			goto error;
+		}
+		/* Copy implem specific */
+		ret = ops->copy_implem_cfg(impl_cfg, &copy->implem_cfg);
+		if (ret < 0)
+			goto error;
+	}
+
+	return 0;
+
+error:
+	(void)venc_config_free_allocated(copy);
+	return ret;
+}
+
+
+int venc_config_copy(const struct venc_config *config,
+		     struct venc_config **ret_obj)
+{
+	int ret;
+	struct venc_config *copy = NULL;
+
+	ULOG_ERRNO_RETURN_ERR_IF(config == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(ret_obj == NULL, EINVAL);
+
+	copy = calloc(1, sizeof(*copy));
+	if (copy == NULL) {
+		ret = -ENOMEM;
+		ULOG_ERRNO("calloc", -ret);
+		return ret;
+	}
+
+	ret = venc_config_copy_allocated(config, copy);
+	if (ret < 0)
+		goto error;
+
+	*ret_obj = copy;
+
+	return 0;
+
+error:
+	if (copy != NULL)
+		(void)venc_config_free(copy);
+	return ret;
+}
+
+
+static int venc_config_free_allocated(struct venc_config *config)
+{
+	int ret, err;
+	enum venc_encoder_implem implem;
+	const struct venc_ops *ops = NULL;
+
+	implem = config->implem;
+
+	ret = venc_get_implem(&implem);
+	ULOG_ERRNO_RETURN_ERR_IF(ret < 0, -ret);
+
+	ops = implem_ops(implem);
+	ULOG_ERRNO_RETURN_ERR_IF(ops == NULL, ENOSYS);
+
+	/* Handle implem specific */
+	if (config->implem_cfg != NULL) {
+		ULOG_ERRNO_RETURN_ERR_IF((ops->free_implem_cfg == NULL),
+					 ENOSYS);
+		/* Free implem specific */
+		err = ops->free_implem_cfg(config->implem_cfg);
+		if (err < 0)
+			ULOG_ERRNO("free_implem_cfg", -err);
+	}
+
+	free((void *)config->name);
+	config->name = NULL;
+	free((void *)config->device);
+	config->device = NULL;
+
+	return 0;
+}
+
+
+int venc_config_free(struct venc_config *config)
+{
+	int ret;
+
+	if (config == NULL)
+		return 0;
+
+	ret = venc_config_free_allocated(config);
+
+	free(config);
+
+	return ret;
+}
+
+
 int venc_new(struct pomp_loop *loop,
 	     const struct venc_config *config,
 	     const struct venc_cbs *cbs,
@@ -273,6 +424,9 @@ int venc_new(struct pomp_loop *loop,
 	const struct vdef_raw_format *supported_formats;
 	int nb_supported_formats;
 
+	(void)pthread_once(&instance_counter_is_init,
+			   initialize_instance_counter);
+
 	ULOG_ERRNO_RETURN_ERR_IF(loop == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(config == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(cbs == NULL, EINVAL);
@@ -281,12 +435,32 @@ int venc_new(struct pomp_loop *loop,
 	self = calloc(1, sizeof(*self));
 	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, ENOMEM);
 
+	self->base = self; /* For logging */
 	self->loop = loop;
 	self->cbs = *cbs;
 	self->userdata = userdata;
-	self->config = *config;
-	self->config.name = xstrdup(config->name);
 	self->last_timestamp = UINT64_MAX;
+	self->enc_id = (atomic_fetch_add(&s_instance_counter, 1) + 1);
+	atomic_init(&self->counters.in, 0);
+	atomic_init(&self->counters.out, 0);
+	atomic_init(&self->counters.pulled, 0);
+	atomic_init(&self->counters.pushed, 0);
+
+	res = venc_config_copy_allocated(config, &self->config);
+	if (res < 0) {
+		ULOG_ERRNO("venc_config_copy_allocated", -res);
+		goto error;
+	}
+
+	if (self->config.name != NULL)
+		res = asprintf(&self->enc_name, "%s", self->config.name);
+	else
+		res = asprintf(&self->enc_name, "%02d", self->enc_id);
+	if (res < 0) {
+		res = -ENOMEM;
+		ULOG_ERRNO("asprintf", -res);
+		goto error;
+	}
 
 	res = venc_get_implem(&self->config.implem);
 	if (res < 0)
@@ -303,7 +477,7 @@ int venc_new(struct pomp_loop *loop,
 				       supported_formats,
 				       nb_supported_formats)) {
 		res = -EINVAL;
-		ULOG_ERRNO(
+		VENC_LOG_ERRNO(
 			"unsupported input format: " VDEF_RAW_FORMAT_TO_STR_FMT,
 			-res,
 			VDEF_RAW_FORMAT_TO_STR_ARG(&config->input.format));
@@ -313,17 +487,17 @@ int venc_new(struct pomp_loop *loop,
 	/* Enforce configuration and provide default values */
 	if ((self->config.input.info.resolution.width == 0) ||
 	    (self->config.input.info.resolution.height == 0)) {
-		ULOGE("invalid input dimensions %dx%d",
-		      self->config.input.info.resolution.width,
-		      self->config.input.info.resolution.height);
+		VENC_LOGE("invalid input dimensions %dx%d",
+			  self->config.input.info.resolution.width,
+			  self->config.input.info.resolution.height);
 		res = -EINVAL;
 		goto error;
 	}
 	if ((self->config.input.info.framerate.num == 0) ||
 	    (self->config.input.info.framerate.den == 0)) {
-		ULOGE("invalid input framerate %d/%d",
-		      self->config.input.info.framerate.num,
-		      self->config.input.info.framerate.den);
+		VENC_LOGE("invalid input framerate %d/%d",
+			  self->config.input.info.framerate.num,
+			  self->config.input.info.framerate.den);
 		res = -EINVAL;
 		goto error;
 	}
@@ -356,7 +530,7 @@ int venc_new(struct pomp_loop *loop,
 		}
 		if ((self->config.h264.rate_control == VENC_RATE_CONTROL_CQ) &&
 		    (self->config.h264.qp == 0)) {
-			ULOGE("invalid QP");
+			VENC_LOGE("invalid QP");
 			res = -EINVAL;
 			goto error;
 		}
@@ -365,7 +539,7 @@ int venc_new(struct pomp_loop *loop,
 		     (self->config.h264.rate_control ==
 		      VENC_RATE_CONTROL_VBR)) &&
 		    (self->config.h264.max_bitrate == 0)) {
-			ULOGE("invalid bitrate");
+			VENC_LOGE("invalid bitrate");
 			res = -EINVAL;
 			goto error;
 		}
@@ -388,10 +562,11 @@ int venc_new(struct pomp_loop *loop,
 		}
 		if ((self->config.h264.base_frame_interval %
 		     self->config.h264.ref_frame_interval) != 0) {
-			ULOGE("invalid base and ref frame intervals "
-			      "(base=%d, ref=%d)",
-			      self->config.h264.base_frame_interval,
-			      self->config.h264.ref_frame_interval);
+			VENC_LOGE(
+				"invalid base and ref frame intervals "
+				"(base=%d, ref=%d)",
+				self->config.h264.base_frame_interval,
+				self->config.h264.ref_frame_interval);
 			res = -EINVAL;
 			goto error;
 		}
@@ -415,9 +590,9 @@ int venc_new(struct pomp_loop *loop,
 		    (self->config.h264.streaming_user_data_sei_version != 2) &&
 		    (self->config.h264.streaming_user_data_sei_version != 4)) {
 			res = -EINVAL;
-			ULOGE("invalid streaming user data SEI version: %d",
-			      self->config.h264
-				      .streaming_user_data_sei_version);
+			VENC_LOGE("invalid streaming user data SEI version: %d",
+				  self->config.h264
+					  .streaming_user_data_sei_version);
 			goto error;
 		}
 		break;
@@ -431,7 +606,7 @@ int venc_new(struct pomp_loop *loop,
 		}
 		if ((self->config.h265.rate_control == VENC_RATE_CONTROL_CQ) &&
 		    (self->config.h265.qp == 0)) {
-			ULOGE("invalid QP");
+			VENC_LOGE("invalid QP");
 			res = -EINVAL;
 			goto error;
 		}
@@ -440,7 +615,7 @@ int venc_new(struct pomp_loop *loop,
 		     (self->config.h265.rate_control ==
 		      VENC_RATE_CONTROL_VBR)) &&
 		    (self->config.h265.max_bitrate == 0)) {
-			ULOGE("invalid bitrate");
+			VENC_LOGE("invalid bitrate");
 			res = -EINVAL;
 			goto error;
 		}
@@ -456,16 +631,16 @@ int venc_new(struct pomp_loop *loop,
 		    (self->config.h265.streaming_user_data_sei_version != 2) &&
 		    (self->config.h265.streaming_user_data_sei_version != 4)) {
 			res = -EINVAL;
-			ULOGE("invalid streaming user data SEI version: %d",
-			      self->config.h265
-				      .streaming_user_data_sei_version);
+			VENC_LOGE("invalid streaming user data SEI version: %d",
+				  self->config.h265
+					  .streaming_user_data_sei_version);
 			goto error;
 		}
 		break;
 	case VDEF_ENCODING_MJPEG:
 		if ((self->config.mjpeg.rate_control == VENC_RATE_CONTROL_CQ) &&
 		    (self->config.mjpeg.quality == 0)) {
-			ULOGE("invalid quality factor");
+			VENC_LOGE("invalid quality factor");
 			res = -EINVAL;
 			goto error;
 		}
@@ -474,7 +649,7 @@ int venc_new(struct pomp_loop *loop,
 		     (self->config.mjpeg.rate_control ==
 		      VENC_RATE_CONTROL_VBR)) &&
 		    (self->config.mjpeg.max_bitrate == 0)) {
-			ULOGE("invalid bitrate");
+			VENC_LOGE("invalid bitrate");
 			res = -EINVAL;
 			goto error;
 		}
@@ -482,11 +657,19 @@ int venc_new(struct pomp_loop *loop,
 			self->config.mjpeg.target_bitrate =
 				self->config.mjpeg.max_bitrate;
 		break;
+
+	case VDEF_ENCODING_PNG:
+		if (self->config.png.compression_level > 9) {
+			VENC_LOGE("invalid compression level %u",
+				  self->config.png.compression_level);
+			res = -EINVAL;
+			goto error;
+		}
+		break;
 	default:
 		res = -EINVAL;
 		goto error;
 	}
-
 
 	res = self->ops->create(self);
 	if (res < 0)
@@ -520,13 +703,19 @@ int venc_stop(struct venc_encoder *self)
 
 int venc_destroy(struct venc_encoder *self)
 {
-	int res = 0;
+	int res = 0, err;
 
 	if (self == NULL)
 		return 0;
 
 	if (self->ops != NULL)
 		res = self->ops->destroy(self);
+
+	VENC_LOGI("venc instance stats: [%u [%u %u] %u]",
+		  self->counters.in,
+		  self->counters.pushed,
+		  self->counters.pulled,
+		  self->counters.out);
 
 	if (res == 0) {
 		switch (self->config.encoding) {
@@ -544,7 +733,12 @@ int venc_destroy(struct venc_encoder *self)
 		default:
 			break;
 		}
-		free((void *)self->config.name);
+
+		err = venc_config_free_allocated(&self->config);
+		if (err < 0)
+			VENC_LOG_ERRNO("venc_config_free_allocated", -err);
+
+		free(self->enc_name);
 		free(self);
 	}
 

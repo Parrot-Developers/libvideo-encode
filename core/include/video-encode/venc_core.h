@@ -126,6 +126,9 @@ enum venc_encoder_implem {
 	/* Turbojpeg implementation */
 	VENC_ENCODER_IMPLEM_TURBOJPEG,
 
+	/* PNG implementation */
+	VENC_ENCODER_IMPLEM_PNG,
+
 	VENC_ENCODER_IMPLEM_MAX,
 };
 
@@ -465,6 +468,18 @@ struct venc_config {
 			 * that case) */
 			unsigned int target_bitrate;
 		} mjpeg;
+
+		struct {
+			/* Compression level; valid values range from 0 to 9,
+			 * corresponding directly to zlib compression levels
+			 * (0 - no compression, 9 - maximum compression);
+			 * note that tests have shown that zlib compression
+			 * levels 3 to 6 usually perform as well as level 9 for
+			 * PNG images, and do considerably fewer caclulations;
+			 * in the future, these values may not correspond
+			 * directly to the zlib compression levels */
+			unsigned int compression_level;
+		} png;
 	};
 
 	/* Implementation specific extensions (optional, can be NULL)

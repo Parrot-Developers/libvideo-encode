@@ -51,3 +51,9 @@
             default false
         help
             Enable the turbojpeg implementation in libvideo-encode.
+
+    config VENC_PNG
+        bool "venc png implementation"
+            default false
+        help
+            Enable the png implementation in libvideo-encode.

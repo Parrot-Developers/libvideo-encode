@@ -1,7 +1,7 @@
 # libvideo-encode - Video encoding library
 
-_libvideo-encode_ is a C library to handle the encoding of H.264 video on
-various platforms with a common API.
+_libvideo-encode_ is a C library that provides a common API for encoding video
+in H.264 and H.265, and photos in JPEG and PNG across various platforms.
 
 The library uses hardware-accelerated encoding when available.
 
@@ -9,7 +9,13 @@ The library uses hardware-accelerated encoding when available.
 
 The following implementations are available:
 
+* MediaCodec on Android 4.2+ (through the NDK API on Android 5.0+
+or the Java API through JNI)
+* PNG (software encoding)
+* TurboJPEG using libjpeg-turbo
+* VideoToolbox on iOS 8+ and MacOS X
 * x264 (software encoding)
+* x265 (software encoding)
 
 The application can force using a specific implementation or let the library
 decide according to what is supported by the platform.
@@ -20,12 +26,28 @@ The library depends on the following Alchemy modules:
 
 * libfutils
 * libh264
+* libh265
+* libmedia-buffers
+* libmedia-buffers-memory
+* libmedia-buffers-memory-generic
 * libpomp
 * libulog
-* libvideo-buffers
+* libvideo-defs
+* libvideo-encode-core
+* libvideo-metadata
 * libvideo-streaming
-* (optional) x264
-* (optional) libvideo-buffers-generic (for x264 support)
+* (optional) libjpeg-turbo (for TurboJPEG support)
+* (optional) libpng (for PNG support)
+* (optional) x264 (for x264 support)
+* (optional) x265 (for x265 support)
+* (optional) x265-10bit (for x264, 10-bit support)
+
+The library also depends on the following frameworks for iOS and MacOS only:
+
+* Foundation
+* CoreMedia
+* CoreVideo
+* VideoToolbox
 
 ## Building
 
@@ -51,8 +73,9 @@ the _pomp_loop_ thread.
 ## Testing
 
 The library can be tested using the provided _venc_ command-line tool which
-takes as input a raw YUV file and can optionally output an encoded H.264
-bitstream.
+takes as input a raw YUV file and can can optionally generate an encoded H.264
+or H.265 bitstream, as well as JPEG or PNG photos, depending on the encoder
+implementation used.
 
 To build the tool, enable _venc_ in the Alchemy build configuration.
 

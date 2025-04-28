@@ -29,6 +29,13 @@
 
 #include <h264/h264.h>
 #include <inttypes.h>
+#ifdef __cplusplus
+#	include <atomic>
+/* codecheck_ignore[SPACING] */
+using std::atomic_uint;
+#else
+#	include <stdatomic.h>
+#endif
 #include <video-streaming/vstrm.h>
 
 #include <video-encode/venc_core.h>
@@ -38,6 +45,68 @@
 #ifdef __cplusplus
 extern "C" {
 #endif /* __cplusplus */
+
+/* Specific logging functions : log the instance ID before the log message */
+#define VENC_LOG_INT(_pri, _fmt, ...)                                          \
+	do {                                                                   \
+		char *prefix = (self != NULL && self->base != NULL)            \
+				       ? self->base->enc_name                  \
+				       : "";                                   \
+		ULOG_PRI(_pri,                                                 \
+			 "%s%s" _fmt,                                          \
+			 prefix != NULL ? prefix : "",                         \
+			 prefix != NULL ? ": " : "",                           \
+			 ##__VA_ARGS__);                                       \
+	} while (0)
+#define VENC_LOGD(_fmt, ...) VENC_LOG_INT(ULOG_DEBUG, _fmt, ##__VA_ARGS__)
+#define VENC_LOGI(_fmt, ...) VENC_LOG_INT(ULOG_INFO, _fmt, ##__VA_ARGS__)
+#define VENC_LOGW(_fmt, ...) VENC_LOG_INT(ULOG_WARN, _fmt, ##__VA_ARGS__)
+#define VENC_LOGE(_fmt, ...) VENC_LOG_INT(ULOG_ERR, _fmt, ##__VA_ARGS__)
+#define VENC_LOG_ERRNO(_fmt, _err, ...)                                        \
+	do {                                                                   \
+		char *prefix = (self != NULL && self->base != NULL)            \
+				       ? self->base->enc_name                  \
+				       : "";                                   \
+		ULOGE_ERRNO((_err),                                            \
+			    "%s%s" _fmt,                                       \
+			    prefix != NULL ? prefix : "",                      \
+			    prefix != NULL ? ": " : "",                        \
+			    ##__VA_ARGS__);                                    \
+	} while (0)
+#define VENC_LOGW_ERRNO(_fmt, _err, ...)                                       \
+	do {                                                                   \
+		char *prefix = (self != NULL && self->base != NULL)            \
+				       ? self->base->enc_name                  \
+				       : "";                                   \
+		ULOGW_ERRNO((_err),                                            \
+			    "%s%s" _fmt,                                       \
+			    prefix != NULL ? prefix : "",                      \
+			    prefix != NULL ? ": " : "",                        \
+			    ##__VA_ARGS__);                                    \
+	} while (0)
+#define VENC_LOG_ERRNO_RETURN_IF(_cond, _err)                                  \
+	do {                                                                   \
+		if (ULOG_UNLIKELY(_cond)) {                                    \
+			VENC_LOG_ERRNO("", (_err));                            \
+			return;                                                \
+		}                                                              \
+	} while (0)
+#define VENC_LOG_ERRNO_RETURN_ERR_IF(_cond, _err)                              \
+	do {                                                                   \
+		if (ULOG_UNLIKELY(_cond)) {                                    \
+			int __pdraw_errno__err = (_err);                       \
+			VENC_LOG_ERRNO("", (__pdraw_errno__err));              \
+			return -(__pdraw_errno__err);                          \
+		}                                                              \
+	} while (0)
+#define VENC_LOG_ERRNO_RETURN_VAL_IF(_cond, _err, _val)                        \
+	do {                                                                   \
+		if (ULOG_UNLIKELY(_cond)) {                                    \
+			VENC_LOG_ERRNO("", (_err));                            \
+			/* codecheck_ignore[RETURN_PARENTHESES] */             \
+			return (_val);                                         \
+		}                                                              \
+	} while (0)
 
 struct venc_ops {
 	/**
@@ -66,6 +135,25 @@ struct venc_ops {
 	 */
 	int (*get_supported_input_formats)(
 		const struct vdef_raw_format **formats);
+
+	/**
+	 * Deep-copy an implementation specific extension (optional).
+	 * When no longer needed, the implementation specific extension returned
+	 * by the function must be freed using the free_implem_cfg() function.
+	 * @param impl_cfg: the implementation specific extension to copy
+	 * @param ret_obj: pointer to an implementation specific extension
+	 * (output)
+	 * @return 0 on success, negative errno value in case of error
+	 */
+	int (*copy_implem_cfg)(const struct venc_config_impl *impl_cfg,
+			       struct venc_config_impl **ret_obj);
+
+	/**
+	 * Free an implementation specific extension (optional).
+	 * @param impl_cfg: the implementation specific extension to free
+	 * @return 0 on success, negative errno value in case of error
+	 */
+	int (*free_implem_cfg)(struct venc_config_impl *impl_cfg);
 
 	/**
 	 * Create an encoder implementation instance.
@@ -188,12 +276,17 @@ struct venc_ops {
 };
 
 struct venc_encoder {
+	/* Reserved */
+	struct venc_encoder *base;
 	void *derived;
 	const struct venc_ops *ops;
 	struct pomp_loop *loop;
 	struct venc_cbs cbs;
 	void *userdata;
 	struct venc_config config;
+
+	int enc_id;
+	char *enc_name;
 
 	union {
 		struct {
@@ -220,7 +313,19 @@ struct venc_encoder {
 	unsigned int slice_mb_count_recovery_point;
 	unsigned int recovery_frame_cnt;
 	uint64_t last_timestamp;
+
+	struct {
+		/* Frames that have passed the input filter */
+		atomic_uint in;
+		/* Frames that have been pushed to the encoder */
+		atomic_uint pushed;
+		/* Frames that have been pulled from the encoder */
+		atomic_uint pulled;
+		/* Frames that have been output (frame_output) */
+		atomic_uint out;
+	} counters;
 };
+
 
 /**
  * Default filter for the input frame queue.
@@ -289,7 +394,7 @@ VENC_API void venc_default_input_filter_internal_confirm_frame(
  *         NULL otherwise
  */
 VENC_API struct venc_config_impl *
-venc_config_get_specific(struct venc_config *config,
+venc_config_get_specific(const struct venc_config *config,
 			 enum venc_encoder_implem implem);
 
 

@@ -50,6 +50,8 @@ enum venc_encoder_implem venc_encoder_implem_from_str(const char *str)
 		return VENC_ENCODER_IMPLEM_VIDEOTOOLBOX;
 	else if (strcasecmp(str, "TURBOJPEG") == 0)
 		return VENC_ENCODER_IMPLEM_TURBOJPEG;
+	else if (strcasecmp(str, "PNG") == 0)
+		return VENC_ENCODER_IMPLEM_PNG;
 	else
 		return VENC_ENCODER_IMPLEM_AUTO;
 }
@@ -74,6 +76,8 @@ const char *venc_encoder_implem_to_str(enum venc_encoder_implem implem)
 		return "VIDEOTOOLBOX";
 	case VENC_ENCODER_IMPLEM_TURBOJPEG:
 		return "TURBOJPEG";
+	case VENC_ENCODER_IMPLEM_PNG:
+		return "PNG";
 	case VENC_ENCODER_IMPLEM_AUTO:
 	default:
 		return "UNKNOWN";
@@ -241,6 +245,7 @@ bool venc_default_input_filter_internal(
 	return true;
 }
 
+
 void venc_default_input_filter_internal_confirm_frame(
 	struct venc_encoder *encoder,
 	struct mbuf_raw_video_frame *frame,
@@ -252,6 +257,7 @@ void venc_default_input_filter_internal_confirm_frame(
 
 	/* Save frame timestamp to last_timestamp */
 	encoder->last_timestamp = frame_info->info.timestamp;
+	atomic_fetch_add(&encoder->counters.in, 1);
 
 	/* Set the input time ancillary data to the frame */
 	time_get_monotonic(&cur_ts);
@@ -259,12 +265,12 @@ void venc_default_input_filter_internal_confirm_frame(
 	err = mbuf_raw_video_frame_add_ancillary_buffer(
 		frame, VENC_ANCILLARY_KEY_INPUT_TIME, &ts_us, sizeof(ts_us));
 	if (err < 0)
-		ULOG_ERRNO("mbuf_raw_video_frame_add_ancillary_buffer", -err);
+		ULOGW_ERRNO(-err, "mbuf_raw_video_frame_add_ancillary_buffer");
 }
 
 
 struct venc_config_impl *
-venc_config_get_specific(struct venc_config *config,
+venc_config_get_specific(const struct venc_config *config,
 			 enum venc_encoder_implem implem)
 {
 	/* Check if specific config is present */

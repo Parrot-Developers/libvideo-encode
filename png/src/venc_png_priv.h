@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2017 Parrot Drones SAS
+ * Copyright (c) 2023 Parrot Drones SAS
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -24,8 +24,8 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _VENC_TURBOJPEG_PRIV_H_
-#define _VENC_TURBOJPEG_PRIV_H_
+#ifndef _VENC_PNG_PRIV_H_
+#define _VENC_PNG_PRIV_H_
 
 #include <pthread.h>
 #include <stdatomic.h>
@@ -45,13 +45,13 @@
 
 #include <video-encode/venc_core.h>
 #include <video-encode/venc_internal.h>
-#include <video-encode/venc_turbojpeg.h>
+#include <video-encode/venc_png.h>
 
-#include <turbojpeg.h>
+#include <png.h>
 
 #define VENC_MSG_FLUSH 'f'
 #define VENC_MSG_STOP 's'
-#define SOFTMPEG_MAX_PLANES 3
+#define SOFTPNG_MAX_PLANES 1
 
 static inline void xfree(void **ptr)
 {
@@ -61,27 +61,27 @@ static inline void xfree(void **ptr)
 	}
 }
 
-struct jpeg_picture {
-	enum TJSAMP subsamp;
+struct png_picture {
+	int color_type;
+	unsigned int bit_depth;
 	unsigned int width;
 	unsigned int height;
 	unsigned int planes;
-	unsigned int flags;
-	unsigned int quality;
-	int stride[SOFTMPEG_MAX_PLANES];
-	const unsigned char *plane[SOFTMPEG_MAX_PLANES];
+
+	unsigned int compression_level;
+	bool data_little_endian;
+	int stride[SOFTPNG_MAX_PLANES];
+	const unsigned char *plane[SOFTPNG_MAX_PLANES];
 };
 
-struct venc_turbojpeg {
+struct venc_png {
 	struct venc_encoder *base;
 
 	struct mbuf_raw_video_frame_queue *in_queue;
 	struct mbuf_coded_video_frame_queue *enc_out_queue;
 	struct pomp_evt *enc_out_queue_evt;
 
-	tjhandle tj_handler;
-
-	struct jpeg_picture in_picture;
+	struct png_picture in_picture;
 
 	struct vdef_coded_format output_format;
 	unsigned int input_frame_cnt;
@@ -95,4 +95,4 @@ struct venc_turbojpeg {
 };
 
 
-#endif /* !_VENC_TURBOJPEG_PRIV_H_ */
+#endif /* !_VENC_PNG_PRIV_H_ */

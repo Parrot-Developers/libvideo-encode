@@ -27,7 +27,8 @@ LOCAL_CONDITIONAL_LIBRARIES := \
 	CONFIG_VENC_VIDEOTOOLBOX:libvideo-encode-videotoolbox \
 	CONFIG_VENC_TURBOJPEG:libvideo-encode-turbojpeg \
 	CONFIG_VENC_X264:libvideo-encode-x264 \
-	CONFIG_VENC_X265:libvideo-encode-x265
+	CONFIG_VENC_X265:libvideo-encode-x265 \
+	CONFIG_VENC_PNG:libvideo-encode-png
 LOCAL_EXPORT_LDLIBS := -lvideo-encode-core
 
 include $(BUILD_LIBRARY)
@@ -126,7 +127,7 @@ LOCAL_MODULE := libvideo-encode-turbojpeg
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video encoding library: turbojpeg implementation
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/turbojpeg/include
-LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
 LOCAL_SRC_FILES := \
 	turbojpeg/src/venc_turbojpeg.c
 LOCAL_LIBRARIES := \
@@ -146,12 +147,38 @@ include $(BUILD_LIBRARY)
 
 include $(CLEAR_VARS)
 
+# png implementation. can be enabled in the product configuration.
+LOCAL_MODULE := libvideo-encode-png
+LOCAL_CATEGORY_PATH := libs
+LOCAL_DESCRIPTION := Video encoding library: png implementation
+LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/png/include
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
+LOCAL_SRC_FILES := \
+	png/src/venc_png.c
+
+LOCAL_LIBRARIES := \
+	libfutils \
+	libmedia-buffers \
+	libmedia-buffers-memory \
+	libmedia-buffers-memory-generic \
+	libpomp \
+	libpng \
+	libulog \
+	libvideo-defs \
+	libvideo-encode-core \
+	libvideo-metadata \
+	libvideo-streaming
+
+include $(BUILD_LIBRARY)
+
+include $(CLEAR_VARS)
+
 # x264 implementation. can be enabled in the product configuration.
 LOCAL_MODULE := libvideo-encode-x264
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video encoding library: x264 implementation
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/x264/include
-LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
 LOCAL_SRC_FILES := \
 	x264/src/venc_x264.c
 LOCAL_LIBRARIES := \
@@ -181,7 +208,7 @@ LOCAL_MODULE := libvideo-encode-x265
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video encoding library: x265 implementation
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/x265/include
-LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
 LOCAL_LDLIBS := -ldl
 LOCAL_SRC_FILES := \
 	x265/src/venc_x265.c

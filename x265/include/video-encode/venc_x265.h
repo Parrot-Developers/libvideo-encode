@@ -57,11 +57,13 @@ struct venc_config_x265 {
 
 	/* A preset is a collection of options that will provide a certain
 	 * encoding speed to compression ratio. The changes it makes will be
-	 * applied before all other parameters are applied. */
+	 * applied before all other parameters are applied.
+	 * Must be dynamically allocated (will be freed). */
 	const char *preset;
 
 	/* Tune the settings. The changes it makes will be applied after the
-	 * preset but before all other parameters. */
+	 * preset but before all other parameters.
+	 * Must be dynamically allocated (will be freed). */
 	const char *tune;
 };
 

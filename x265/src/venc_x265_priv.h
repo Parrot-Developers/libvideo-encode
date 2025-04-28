@@ -82,6 +82,7 @@ struct venc_x265 {
 	atomic_bool should_stop;
 	atomic_bool flushing;
 	atomic_bool flush_discard;
+	atomic_bool flush_sent;
 	struct mbox *mbox;
 };
 

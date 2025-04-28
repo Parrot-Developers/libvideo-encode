@@ -80,6 +80,7 @@ struct venc_x264 {
 	atomic_bool should_stop;
 	atomic_bool flushing;
 	atomic_bool flush_discard;
+	atomic_bool reopen_needed;
 	struct mbox *mbox;
 };
 

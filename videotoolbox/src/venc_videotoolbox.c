@@ -40,8 +40,8 @@ static int nb_supported_encodings;
 static pthread_once_t supported_formats_is_init = PTHREAD_ONCE_INIT;
 static void initialize_supported_formats(void)
 {
-	supported_formats[0] = vdef_i420;
-	supported_formats[1] = vdef_nv12;
+	supported_formats[0] = vdef_nv12;
+	supported_formats[1] = vdef_i420;
 
 	CFMutableDictionaryRef buffer_attr = NULL;
 	VTCompressionSessionRef compress_ref;
@@ -83,6 +83,53 @@ static void initialize_supported_formats(void)
 	}
 
 	nb_supported_encodings = j;
+}
+
+
+#define GET_SYM(prefix, fallback)                                              \
+	do {                                                                   \
+		CFStringRef *handle =                                          \
+			(CFStringRef *)dlsym(RTLD_DEFAULT, #prefix #fallback); \
+		if (!handle)                                                   \
+			s_compat_keys.prefix##fallback = CFSTR(#fallback);     \
+		else                                                           \
+			s_compat_keys.prefix##fallback = *handle;              \
+	} while (0)
+
+
+static pthread_once_t compat_keys_is_init = PTHREAD_ONCE_INIT;
+static void initialize_compat_keys(void)
+{
+	GET_SYM(kVTProfileLevel_, H264_Baseline_4_0);
+	GET_SYM(kVTProfileLevel_, H264_Baseline_4_2);
+	GET_SYM(kVTProfileLevel_, H264_Baseline_5_0);
+	GET_SYM(kVTProfileLevel_, H264_Baseline_5_1);
+	GET_SYM(kVTProfileLevel_, H264_Baseline_5_2);
+	GET_SYM(kVTProfileLevel_, H264_Main_AutoLevel);
+	GET_SYM(kVTProfileLevel_, H264_Main_4_2);
+	GET_SYM(kVTProfileLevel_, H264_Main_5_1);
+	GET_SYM(kVTProfileLevel_, H264_Main_5_2);
+	GET_SYM(kVTProfileLevel_, H264_High_AutoLevel);
+	GET_SYM(kVTProfileLevel_, H264_High_3_0);
+	GET_SYM(kVTProfileLevel_, H264_High_3_1);
+	GET_SYM(kVTProfileLevel_, H264_High_3_2);
+	GET_SYM(kVTProfileLevel_, H264_High_4_0);
+	GET_SYM(kVTProfileLevel_, H264_High_4_1);
+	GET_SYM(kVTProfileLevel_, H264_High_4_2);
+	GET_SYM(kVTProfileLevel_, H264_High_5_1);
+	GET_SYM(kVTProfileLevel_, H264_High_5_2);
+	GET_SYM(kVTProfileLevel_, H264_Extended_AutoLevel);
+	GET_SYM(kVTProfileLevel_, H264_Extended_5_0);
+
+	GET_SYM(kVTProfileLevel_, HEVC_Main_AutoLevel);
+	GET_SYM(kVTProfileLevel_, HEVC_Main10_AutoLevel);
+
+	GET_SYM(kVTH264EntropyMode_, CAVLC);
+	GET_SYM(kVTH264EntropyMode_, CABAC);
+
+	GET_SYM(kCVImageBufferTransferFunction_, SMPTE_ST_2084_PQ);
+	GET_SYM(kCVImageBufferTransferFunction_, ITU_R_2100_HLG);
+	GET_SYM(kCVImageBufferTransferFunction_, sRGB);
 }
 
 
@@ -142,7 +189,7 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 		ret = mbox_peek(self->mbox, &message);
 		if (ret < 0) {
 			if (ret != -EAGAIN)
-				ULOG_ERRNO("mbox_peek", -ret);
+				VENC_LOG_ERRNO("mbox_peek", -ret);
 			break;
 		}
 
@@ -151,34 +198,32 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 			err = pomp_loop_idle_add_with_cookie(
 				self->base->loop, call_flush_done, self, self);
 			if (err < 0)
-				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
-					   -err);
+				VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					       -err);
 			break;
 		case VENC_VIDEOTOOLBOX_MESSAGE_TYPE_STOP:
 			err = pomp_loop_idle_add_with_cookie(
 				self->base->loop, call_stop_done, self, self);
 			if (err < 0)
-				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
-					   -err);
+				VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					       -err);
 			break;
 		case VENC_VIDEOTOOLBOX_MESSAGE_TYPE_ERROR:
 			encoder_error(self, message.error);
 			break;
 		default:
-			ULOGE("unknown message type: %d", message.type);
+			VENC_LOGE("unknown message type: %d", message.type);
 			break;
 		}
 	}
 }
 
 
-static CFMutableDictionaryRef buffer_attr_create(int full_range)
+static CFMutableDictionaryRef buffer_attr_create(struct venc_videotoolbox *self)
 {
 	int err = 0;
 	CFMutableDictionaryRef buffer_attr = NULL, io_surface_properties = NULL;
 	CFNumberRef pix_fmt = NULL;
-	int fmt = full_range ? kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-			     : kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
 
 	buffer_attr =
 		CFDictionaryCreateMutable(kCFAllocatorDefault,
@@ -187,7 +232,7 @@ static CFMutableDictionaryRef buffer_attr_create(int full_range)
 					  &kCFTypeDictionaryValueCallBacks);
 	if (buffer_attr == NULL) {
 		err = -ENOMEM;
-		ULOG_ERRNO("CFDictionaryCreateMutable", -err);
+		VENC_LOG_ERRNO("CFDictionaryCreateMutable", -err);
 		goto out;
 	}
 
@@ -199,15 +244,16 @@ static CFMutableDictionaryRef buffer_attr_create(int full_range)
 					  &kCFTypeDictionaryValueCallBacks);
 	if (io_surface_properties == NULL) {
 		err = -ENOMEM;
-		ULOG_ERRNO("CFDictionaryCreateMutable", -err);
+		VENC_LOG_ERRNO("CFDictionaryCreateMutable", -err);
 		goto out;
 	}
 
-	pix_fmt =
-		CFNumberCreate(kCFAllocatorDefault, kCFNumberSInt32Type, &fmt);
+	pix_fmt = CFNumberCreate(kCFAllocatorDefault,
+				 kCFNumberSInt32Type,
+				 &self->vt_pixel_format);
 	if (pix_fmt == NULL) {
 		err = -ENOMEM;
-		ULOG_ERRNO("CFNumberCreate", -err);
+		VENC_LOG_ERRNO("CFNumberCreate", -err);
 		goto out;
 	}
 
@@ -230,26 +276,41 @@ out:
 
 static void out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 {
+	int err;
 	struct venc_videotoolbox *self = userdata;
 	struct mbuf_coded_video_frame *out_frame = NULL;
-	int ret;
 
-	if (atomic_load(&self->ps_stored) == false)
+	if (!atomic_load(&self->ps_stored))
 		return;
 
 	while (true) {
-		ret = mbuf_coded_video_frame_queue_pop(self->out_queue,
+		err = mbuf_coded_video_frame_queue_pop(self->out_queue,
 						       &out_frame);
-		if (ret == -EAGAIN) {
+		if (err == -EAGAIN) {
 			return;
-		} else if (ret < 0) {
-			ULOG_ERRNO("mbuf_coded_video_frame_queue_pop:output",
-				   -ret);
+		} else if (err < 0) {
+			VENC_LOG_ERRNO(
+				"mbuf_coded_video_frame_queue_pop:output",
+				-err);
 			return;
 		}
-		self->base->cbs.frame_output(
-			self->base, 0, out_frame, self->base->userdata);
-		mbuf_coded_video_frame_unref(out_frame);
+		struct vdef_coded_frame out_info = {};
+		err = mbuf_coded_video_frame_get_frame_info(out_frame,
+							    &out_info);
+		if (err < 0) {
+			VENC_LOG_ERRNO("mbuf_coded_video_frame_get_frame_info",
+				       -err);
+		}
+		if (!atomic_load(&self->flush_discard)) {
+			self->base->cbs.frame_output(
+				self->base, 0, out_frame, self->base->userdata);
+			self->base->counters.out++;
+		} else {
+			VENC_LOGD("discarding frame: %d", out_info.info.index);
+		}
+		err = mbuf_coded_video_frame_unref(out_frame);
+		if (err < 0)
+			VENC_LOG_ERRNO("mbuf_coded_video_frame_unref", -err);
 	}
 }
 
@@ -262,14 +323,15 @@ static int do_flush(struct venc_videotoolbox *self)
 		/* Flush the queues */
 		ret = mbuf_raw_video_frame_queue_flush(self->in_queue);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_flush:input",
-				   -ret);
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_flush:input",
+				       -ret);
 			return ret;
 		}
 		ret = mbuf_coded_video_frame_queue_flush(self->out_queue);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_coded_video_frame_queue_flush:output",
-				   -ret);
+			VENC_LOG_ERRNO(
+				"mbuf_coded_video_frame_queue_flush:output",
+				-ret);
 			return ret;
 		}
 	}
@@ -279,7 +341,8 @@ static int do_flush(struct venc_videotoolbox *self)
 		ret = VTCompressionSessionCompleteFrames(self->compress_ref,
 							 kCMTimeIndefinite);
 		if (ret)
-			ULOG_ERRNO("VTCompressionSessionCompleteFrames", -ret);
+			VENC_LOG_ERRNO("VTCompressionSessionCompleteFrames",
+				       -ret);
 	}
 	atomic_store(&self->flushing, false);
 
@@ -289,7 +352,7 @@ static int do_flush(struct venc_videotoolbox *self)
 	};
 	ret = mbox_push(self->mbox, &message);
 	if (ret < 0)
-		ULOG_ERRNO("mbox_push", -ret);
+		VENC_LOG_ERRNO("mbox_push", -ret);
 
 	atomic_store(&self->flush, false);
 
@@ -311,7 +374,7 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 {
 	int ret, err;
 	struct vdef_raw_frame in_info;
-	struct vdef_coded_frame out_info;
+	struct vdef_coded_frame out_info = {};
 	uint8_t *data, *start;
 	size_t len, offset = 0, nalu_len;
 	uint8_t start_code[] = {0, 0, 0, 1};
@@ -333,9 +396,9 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 
 	status = CMBlockBufferGetDataPointer(ref, 0, NULL, NULL, (char **)&ptr);
 	if (status != noErr) {
-		ULOG_ERRNO("CMBlockBufferGetDataPointer status=%d",
-			   EPROTO,
-			   (int)status);
+		VENC_LOG_ERRNO("CMBlockBufferGetDataPointer status=%d",
+			       EPROTO,
+			       (int)status);
 	}
 	start = data = ptr;
 
@@ -343,14 +406,14 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 
 	ret = mbuf_mem_generic_wrap(ptr, len, cmbr_mbuf_release, ref, &mem);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_mem_generic_wrap", -ret);
+		VENC_LOG_ERRNO("mbuf_mem_generic_wrap", -ret);
 		goto out;
 	}
 
 	/* Frame creation */
 	ret = mbuf_raw_video_frame_get_frame_info(in_frame, &in_info);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_get_frame_info", -ret);
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_frame_info", -ret);
 		goto out;
 	}
 
@@ -373,6 +436,7 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 	}
 
 	out_info.type = VDEF_CODED_FRAME_TYPE_UNKNOWN;
+	out_info.layer = 0;
 
 	while (offset < len) {
 		memcpy(&nalu_len, data, sizeof(uint32_t));
@@ -398,12 +462,12 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 
 	ret = mbuf_coded_video_frame_new(&out_info, out_frame);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_new", -ret);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_new", -ret);
 		goto out;
 	}
 	ret = mbuf_coded_video_frame_set_callbacks(*out_frame, &frame_cbs);
 	if (ret < 0)
-		ULOG_ERRNO("mbuf_coded_video_frame_set_callbacks", -ret);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_set_callbacks", -ret);
 
 	/* Frame metadata */
 	ret = mbuf_raw_video_frame_foreach_ancillary_data(
@@ -411,18 +475,20 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 		mbuf_coded_video_frame_ancillary_data_copier,
 		*out_frame);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_foreach_ancillary_data", -ret);
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_foreach_ancillary_data",
+			       -ret);
 		goto out;
 	}
 	ret = mbuf_raw_video_frame_get_metadata(in_frame, &metadata);
 	if (ret == 0) {
 		ret = mbuf_coded_video_frame_set_metadata(*out_frame, metadata);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_coded_video_frame_set_metadata", -ret);
+			VENC_LOG_ERRNO("mbuf_coded_video_frame_set_metadata",
+				       -ret);
 			goto out;
 		}
 	} else if ((ret < 0) && (ret != -ENOENT)) {
-		ULOG_ERRNO("mbuf_raw_video_frame_get_metadata", -ret);
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_metadata", -ret);
 		goto out;
 	}
 
@@ -432,7 +498,7 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 		ret = venc_h264_generate_nalus(
 			self->base, *out_frame, &out_info);
 		if (ret < 0) {
-			ULOG_ERRNO("venc_h264_generate_nalus", -ret);
+			VENC_LOG_ERRNO("venc_h264_generate_nalus", -ret);
 			goto out;
 		}
 	} else if (self->base->config.encoding == VDEF_ENCODING_H265) {
@@ -441,7 +507,7 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 		ret = venc_h265_generate_nalus(
 			self->base, *out_frame, &out_info);
 		if (ret < 0) {
-			ULOG_ERRNO("venc_h265_generate_nalus", -ret);
+			VENC_LOG_ERRNO("venc_h265_generate_nalus", -ret);
 			goto out;
 		}
 	}
@@ -484,17 +550,18 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 		ret = mbuf_coded_video_frame_add_nalu(
 			*out_frame, mem, offset, &out_nalu);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_coded_video_frame_add_nalu", -ret);
+			VENC_LOG_ERRNO("mbuf_coded_video_frame_add_nalu", -ret);
 			goto out;
 		}
 
 		data += 4 + nalu_len;
 		offset += 4 + nalu_len;
 	}
+
 out:
 	err = mbuf_mem_unref(mem);
 	if (err != 0)
-		ULOG_ERRNO("mbuf_mem_unref", -err);
+		VENC_LOG_ERRNO("mbuf_mem_unref", -err);
 
 	return ret;
 }
@@ -504,53 +571,68 @@ static int set_h264_ps(struct venc_videotoolbox *self,
 		       CMVideoFormatDescriptionRef format)
 {
 	int ret;
-	size_t ps_count, ps_size;
-	const uint8_t *ps;
+	OSStatus status;
+	size_t ps_count;
+	uint8_t **ps_bufs[] = {
+		&self->base->h264.sps,
+		&self->base->h264.pps,
+	};
+	size_t *ps_sizes[] = {
+		&self->base->h264.sps_size,
+		&self->base->h264.pps_size,
+	};
+	size_t expected_ps_count = SIZEOF_ARRAY(ps_bufs);
 
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
 	pthread_mutex_lock(&self->ps_lock);
 
-	ret = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+	status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
 		format, 0, NULL, NULL, &ps_count, NULL);
-	if (ret) {
+	if (status != noErr) {
 		ret = -EAGAIN;
-		ULOGE("no PS available");
+		VENC_LOGE("no PS available");
 		goto end;
 	}
-	if (ps_count < 2) {
+	if (ps_count != expected_ps_count) {
 		ret = -ENOSYS;
-		ULOG_ERRNO("not enough PS", -ret);
-		goto end;
-	} else if (ps_count > 2) {
-		ret = -ENOSYS;
-		ULOG_ERRNO("too many PS", -ret);
+		VENC_LOG_ERRNO("invalid PS count (expected %zu, got %zu)",
+			       -ret,
+			       expected_ps_count,
+			       ps_count);
 		goto end;
 	}
 
-	ret = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-		format, 0, &ps, &ps_size, NULL, NULL);
-	if (ret) {
-		ULOG_ERRNO("CMVideoFormatDescriptionGetH264ParameterSetAtIndex",
-			   -ret);
-		goto end;
+	for (size_t i = 0; i < expected_ps_count; i++) {
+		const uint8_t *ps = NULL;
+		size_t ps_size;
+		status = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+			format, i, &ps, &ps_size, NULL, NULL);
+		if (status != noErr) {
+			ret = -EPROTO;
+			VENC_LOG_ERRNO(
+				"CMVideoFormatDescriptionGetH264ParameterSetAtIndex",
+				-ret);
+			goto end;
+		}
+		copy_ps(ps_bufs[i], ps_sizes[i], ps, ps_size);
 	}
-	copy_ps(&self->base->h264.sps, &self->base->h264.sps_size, ps, ps_size);
-
-	ret = CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
-		format, 1, &ps, &ps_size, NULL, NULL);
-	if (ret) {
-		ULOG_ERRNO("CMVideoFormatDescriptionGetH264ParameterSetAtIndex",
-			   -ret);
-		goto end;
-	}
-	copy_ps(&self->base->h264.pps, &self->base->h264.pps_size, ps, ps_size);
 
 	/* Initialize the H.264 writer */
-	venc_h264_writer_new(self->base->h264.sps,
-			     self->base->h264.sps_size,
-			     self->base->h264.pps,
-			     self->base->h264.pps_size,
-			     &self->base->h264.ctx);
+	ret = venc_h264_writer_new(self->base->h264.sps,
+				   self->base->h264.sps_size,
+				   self->base->h264.pps,
+				   self->base->h264.pps_size,
+				   &self->base->h264.ctx);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("venc_h264_writer_new", -ret);
+		goto end;
+	}
+	ret = venc_h264_patch_ps(self->base);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("venc_h264_patch_ps", -ret);
+		goto end;
+	}
+
 end:
 	pthread_mutex_unlock(&self->ps_lock);
 
@@ -562,78 +644,76 @@ static int set_h265_ps(struct venc_videotoolbox *self,
 		       CMVideoFormatDescriptionRef format)
 {
 	int ret = 0;
-	size_t ps_count, ps_size;
-	const uint8_t *ps;
+	OSStatus status;
 
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
 	pthread_mutex_lock(&self->ps_lock);
 
 	if (__builtin_available(iOS 11.0, macOS 10.13, tvos 11.0, *)) {
-
-		ret = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-			format, 0, NULL, NULL, &ps_count, NULL);
-		if (ret) {
-			ret = -EAGAIN;
-			ULOGE("no PS available");
-			goto end;
-		}
-		if (ps_count < 3) {
-			ret = -ENOSYS;
-			ULOG_ERRNO("not enough PS", -ret);
-			goto end;
-		} else if (ps_count > 3) {
-			ret = -ENOSYS;
-			ULOG_ERRNO("too many PS", -ret);
-			goto end;
-		}
-
-		ret = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-			format, 0, &ps, &ps_size, NULL, NULL);
-		if (ret) {
-			ULOG_ERRNO(
-				"CMVideoFormatDescriptionGetHEVCParameterSetAtIndex",
-				-ret);
-			goto end;
-		}
-		copy_ps(&self->base->h265.vps,
+		size_t ps_count;
+		uint8_t **ps_bufs[] = {
+			&self->base->h265.vps,
+			&self->base->h265.sps,
+			&self->base->h265.pps,
+		};
+		size_t *ps_sizes[] = {
 			&self->base->h265.vps_size,
-			ps,
-			ps_size);
-
-		ret = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-			format, 1, &ps, &ps_size, NULL, NULL);
-		if (ret) {
-			ULOG_ERRNO(
-				"CMVideoFormatDescriptionGetHEVCParameterSetAtIndex",
-				-ret);
-			goto end;
-		}
-		copy_ps(&self->base->h265.sps,
 			&self->base->h265.sps_size,
-			ps,
-			ps_size);
+			&self->base->h265.pps_size,
+		};
+		size_t expected_ps_count = SIZEOF_ARRAY(ps_bufs);
 
-		ret = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
-			format, 2, &ps, &ps_size, NULL, NULL);
-		if (ret) {
-			ULOG_ERRNO(
-				"CMVideoFormatDescriptionGetHEVCParameterSetAtIndex",
-				-ret);
+		status = CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+			format, 0, NULL, NULL, &ps_count, NULL);
+		if (status != noErr) {
+			ret = -EAGAIN;
+			VENC_LOGE("no PS available");
 			goto end;
 		}
-		copy_ps(&self->base->h265.pps,
-			&self->base->h265.pps_size,
-			ps,
-			ps_size);
+		if (ps_count != expected_ps_count) {
+			ret = -ENOSYS;
+			VENC_LOG_ERRNO(
+				"invalid PS count (expected %zu, got %zu)",
+				-ret,
+				expected_ps_count,
+				ps_count);
+			goto end;
+		}
+
+		for (size_t i = 0; i < expected_ps_count; i++) {
+			const uint8_t *ps = NULL;
+			size_t ps_size;
+			status =
+				/* codecheck_ignore[LONG_LINE] */
+				CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
+					format, i, &ps, &ps_size, NULL, NULL);
+			if (status != noErr) {
+				ret = -EPROTO;
+				VENC_LOG_ERRNO(
+					"CMVideoFormatDescriptionGetHEVCParameterSetAtIndex",
+					-ret);
+				goto end;
+			}
+			copy_ps(ps_bufs[i], ps_sizes[i], ps, ps_size);
+		}
 
 		/* Initialize the H.265 writer */
-		venc_h265_writer_new(self->base->h265.vps,
-				     self->base->h265.vps_size,
-				     self->base->h265.sps,
-				     self->base->h265.sps_size,
-				     self->base->h265.pps,
-				     self->base->h265.pps_size,
-				     &self->base->h265.ctx);
+		ret = venc_h265_writer_new(self->base->h265.vps,
+					   self->base->h265.vps_size,
+					   self->base->h265.sps,
+					   self->base->h265.sps_size,
+					   self->base->h265.pps,
+					   self->base->h265.pps_size,
+					   &self->base->h265.ctx);
+		if (ret < 0) {
+			VENC_LOG_ERRNO("venc_h265_writer_new", -ret);
+			goto end;
+		}
+		ret = venc_h265_patch_ps(self->base);
+		if (ret < 0) {
+			VENC_LOG_ERRNO("venc_h265_patch_ps", -ret);
+			goto end;
+		}
 	}
 
 end:
@@ -651,7 +731,7 @@ static int set_ps(struct venc_videotoolbox *self,
 
 	format = CMSampleBufferGetFormatDescription(sample_buffer);
 	if (!format) {
-		ULOG_ERRNO("CMSampleBufferGetFormatDescription", EPROTO);
+		VENC_LOG_ERRNO("CMSampleBufferGetFormatDescription", EPROTO);
 		return -EPROTO;
 	}
 
@@ -659,7 +739,7 @@ static int set_ps(struct venc_videotoolbox *self,
 	case VDEF_ENCODING_H264:
 		ret = set_h264_ps(self, format);
 		if (ret) {
-			ULOG_ERRNO("set_h264_ps", -ret);
+			VENC_LOG_ERRNO("set_h264_ps", -ret);
 			goto out;
 		}
 		atomic_store(&self->ps_stored, true);
@@ -667,7 +747,7 @@ static int set_ps(struct venc_videotoolbox *self,
 	case VDEF_ENCODING_H265:
 		ret = set_h265_ps(self, format);
 		if (ret) {
-			ULOG_ERRNO("set_h265_ps", -ret);
+			VENC_LOG_ERRNO("set_h265_ps", -ret);
 			goto out;
 		}
 		atomic_store(&self->ps_stored, true);
@@ -687,7 +767,7 @@ static void frame_output_cb(void *outputCallbackRefCon,
 			    VTEncodeInfoFlags infoFlags,
 			    CMSampleBufferRef sampleBuffer)
 {
-	int ret;
+	int ret, err;
 	struct venc_videotoolbox *self = outputCallbackRefCon;
 	struct mbuf_raw_video_frame *in_frame = sourceFrameRefCon;
 	struct mbuf_coded_video_frame *out_frame = NULL;
@@ -695,34 +775,36 @@ static void frame_output_cb(void *outputCallbackRefCon,
 	struct timespec cur_ts = {0, 0};
 	uint64_t ts_us;
 
-	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
+	VENC_LOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
 
 	if (status != noErr) {
-		ULOG_ERRNO("encoder error %d", EPROTO, (int)status);
+		VENC_LOG_ERRNO("encoder error %d", EPROTO, (int)status);
 		goto out;
 	}
 
-	ULOG_ERRNO_RETURN_IF(sampleBuffer == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_IF(in_frame == NULL, EINVAL);
+	VENC_LOG_ERRNO_RETURN_IF(sampleBuffer == NULL, EINVAL);
+	VENC_LOG_ERRNO_RETURN_IF(in_frame == NULL, EINVAL);
+
+	self->base->counters.pulled++;
 
 	/* Discard the buffer when flushing with frames discarding */
 	if ((atomic_load(&self->flushing)) &&
 	    (atomic_load(&self->flush_discard))) {
-		ULOGI("frame discarded (flushing)");
+		VENC_LOGI("frame discarded (flushing)");
 		goto out;
 	}
 
 	bbuf = CMSampleBufferGetDataBuffer(sampleBuffer);
 	if (bbuf == NULL) {
 		ret = -ENOSYS;
-		ULOG_ERRNO("CMSampleBufferGetDataBuffer", -ret);
+		VENC_LOG_ERRNO("CMSampleBufferGetDataBuffer", -ret);
 		goto out;
 	}
 
-	if (atomic_load(&self->ps_stored) == false) {
+	if (!atomic_load(&self->ps_stored)) {
 		ret = set_ps(self, sampleBuffer);
 		if (ret < 0) {
-			ULOG_ERRNO("set_ps", -ret);
+			VENC_LOG_ERRNO("set_ps", -ret);
 			goto out;
 		}
 	}
@@ -730,295 +812,914 @@ static void frame_output_cb(void *outputCallbackRefCon,
 	/* Set the metadata */
 	ret = set_frame_metadata(self, in_frame, &out_frame, bbuf);
 	if (ret < 0) {
-		ULOG_ERRNO("set_frame_metadata", -ret);
+		VENC_LOG_ERRNO("set_frame_metadata", -ret);
 		goto out;
 	}
 
 	time_get_monotonic(&cur_ts);
 	time_timespec_to_us(&cur_ts, &ts_us);
 
-	ret = mbuf_coded_video_frame_add_ancillary_buffer(
+	err = mbuf_coded_video_frame_add_ancillary_buffer(
 		out_frame,
 		VENC_ANCILLARY_KEY_OUTPUT_TIME,
 		&ts_us,
 		sizeof(ts_us));
-	if (ret < 0)
-		ULOG_ERRNO("mbuf_coded_video_frame_add_ancillary_buffer", -ret);
+	if (err < 0) {
+		VENC_LOGW_ERRNO("mbuf_coded_video_frame_add_ancillary_buffer",
+				-err);
+	}
 
 	/* Output the frame */
 	ret = mbuf_coded_video_frame_finalize(out_frame);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_finalize", -ret);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_finalize", -ret);
 		goto out;
 	}
 
 	ret = mbuf_coded_video_frame_queue_push(self->out_queue, out_frame);
 	if (ret < 0)
-		ULOG_ERRNO("mbuf_coded_video_frame_queue_push", -ret);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_queue_push", -ret);
+
 out:
 	/* Unref the buffers */
-	if (in_frame)
-		mbuf_raw_video_frame_unref(in_frame);
-	if (out_frame)
-		mbuf_coded_video_frame_unref(out_frame);
+	if (in_frame) {
+		err = mbuf_raw_video_frame_unref(in_frame);
+		if (err < 0)
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_unref", -ret);
+	}
+	if (out_frame) {
+		err = mbuf_coded_video_frame_unref(out_frame);
+		if (err < 0)
+			VENC_LOG_ERRNO("mbuf_coded_video_frame_unref", -ret);
+	}
 }
 
 
-static void frame_data_release(void *release_ctx,
-			       const void *data,
-			       size_t size,
-			       size_t plane_count,
-			       const void *plane_adresses[])
+static int set_profile_level(struct venc_videotoolbox *self,
+			     unsigned int p,
+			     unsigned int l)
 {
-	struct frame_data *in_frame_data = release_ctx;
-	mbuf_raw_video_frame_release_packed_buffer(in_frame_data->frame,
-						   in_frame_data->data);
-	mbuf_raw_video_frame_unref(in_frame_data->frame);
-	free(in_frame_data);
+	int ret;
+	OSStatus osstatus;
+	CFStringRef profile_level = NULL;
+
+	switch (self->base->config.encoding) {
+	case VDEF_ENCODING_H264:
+		ret = h264_profile_level_to_videotoolbox(p, l, &profile_level);
+		break;
+	case VDEF_ENCODING_H265:
+		/* Note: videotoolbox does not support HEVC level */
+		ret = h265_profile_level_to_videotoolbox(p, &profile_level);
+		break;
+	default:
+		ret = -ENOSYS;
+		break;
+	}
+	if (ret < 0)
+		goto out;
+
+	osstatus = VTSessionSetProperty(self->compress_ref,
+					kVTCompressionPropertyKey_ProfileLevel,
+					profile_level);
+	if (osstatus != noErr) {
+		ret = -ENOSYS;
+		VENC_LOGE("unable to set profile/level");
+		goto out;
+	}
+	VENC_LOGD("set profile/level to '%s'",
+		  profile_level ? CFStringGetCStringPtr(profile_level,
+							kCFStringEncodingASCII)
+				: "AUTO");
+
+	ret = 0;
+
+out:
+	return ret;
+}
+
+
+static int set_entropy_coding(struct venc_videotoolbox *self)
+{
+	int ret;
+	OSStatus osstatus;
+	CFStringRef ec_key = NULL;
+
+	switch (self->base->config.encoding) {
+	case VDEF_ENCODING_H264:
+		ret = entropy_coding_to_videotoolbox(
+			self->base->config.h264.entropy_coding, &ec_key);
+		break;
+	case VDEF_ENCODING_H265:
+		/* N/A */
+		return 0;
+	default:
+		ret = -ENOSYS;
+		break;
+	}
+	if (ret < 0)
+		goto out;
+
+	osstatus =
+		VTSessionSetProperty(self->compress_ref,
+				     kVTCompressionPropertyKey_H264EntropyMode,
+				     ec_key);
+	if (osstatus != noErr) {
+		ret = -ENOSYS;
+		VENC_LOGE("unable to set profile/level");
+		goto out;
+	}
+	VENC_LOGD("set entropy coding to '%s'",
+		  ec_key ? CFStringGetCStringPtr(ec_key, kCFStringEncodingASCII)
+			 : "AUTO");
+
+	ret = 0;
+
+out:
+	return ret;
+}
+
+
+static int set_color_transfer_matrix(struct venc_videotoolbox *self,
+				     enum vdef_color_primaries cp,
+				     enum vdef_transfer_function tf,
+				     enum vdef_matrix_coefs mc)
+{
+	int ret;
+	OSStatus osstatus;
+	CFStringRef cp_key = NULL;
+	CFStringRef tf_key = NULL;
+	CFStringRef mc_key = NULL;
+
+	ret = color_primaries_to_videotoolbox(cp, &cp_key);
+	if (ret < 0)
+		goto out;
+
+	osstatus =
+		VTSessionSetProperty(self->compress_ref,
+				     kVTCompressionPropertyKey_ColorPrimaries,
+				     cp_key);
+	if (osstatus != noErr) {
+		ret = -ENOSYS;
+		VENC_LOGE("unable to set color primaries");
+		goto out;
+	}
+	VENC_LOGD("set color primaries to '%s'",
+		  cp_key ? CFStringGetCStringPtr(cp_key, kCFStringEncodingASCII)
+			 : "AUTO");
+
+	ret = transfer_function_to_videotoolbox(tf, &tf_key);
+	if (ret < 0)
+		goto out;
+
+	osstatus =
+		VTSessionSetProperty(self->compress_ref,
+				     kVTCompressionPropertyKey_TransferFunction,
+				     tf_key);
+	if (osstatus != noErr) {
+		ret = -ENOSYS;
+		VENC_LOGE("unable to set transfer function");
+		goto out;
+	}
+	VENC_LOGD("set transfer function to '%s'",
+		  tf_key ? CFStringGetCStringPtr(tf_key, kCFStringEncodingASCII)
+			 : "AUTO");
+
+	ret = matrix_coefs_to_videotoolbox(mc, &mc_key);
+	if (ret < 0)
+		goto out;
+
+	osstatus = VTSessionSetProperty(self->compress_ref,
+					kVTCompressionPropertyKey_YCbCrMatrix,
+					mc_key);
+	if (osstatus != noErr) {
+		ret = -ENOSYS;
+		VENC_LOGE("unable to set matrix coefs");
+		goto out;
+	}
+	VENC_LOGD("set matrix coefs to '%s'",
+		  mc_key ? CFStringGetCStringPtr(mc_key, kCFStringEncodingASCII)
+			 : "AUTO");
+
+	ret = 0;
+
+out:
+	return ret;
+}
+
+
+static int set_gop(struct venc_videotoolbox *self, float gop_length_sec)
+{
+	int ret;
+	OSStatus osstatus;
+	int gop_size;
+	CFNumberRef gop_size_num = NULL;
+
+	gop_size = (int)((gop_length_sec *
+			  (float)self->base->config.input.info.framerate.num) /
+			 self->base->config.input.info.framerate.den);
+
+	gop_size_num = CFNumberCreate(
+		kCFAllocatorDefault, kCFNumberSInt32Type, &gop_size);
+	if (gop_size_num == NULL) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	osstatus = VTSessionSetProperty(
+		self->compress_ref,
+		kVTCompressionPropertyKey_MaxKeyFrameInterval,
+		gop_size_num);
+	if (osstatus != noErr) {
+		ret = -ENOSYS;
+		VENC_LOGE("unable to set gop_length_sec to %.2f",
+			  gop_length_sec);
+		goto out;
+	}
+
+	ret = 0;
+
+out:
+	return ret;
+}
+
+
+static int set_bitrates(struct venc_videotoolbox *self,
+			unsigned int target_bitrate,
+			unsigned int max_bitrate)
+{
+	int ret;
+	OSStatus osstatus;
+	int64_t bytes_per_second = (1.3 * max_bitrate / 8);
+	int64_t one_second = 1;
+	CFNumberRef target_bitrate_num = NULL;
+	CFNumberRef bytes_per_second_num = NULL;
+	CFNumberRef one_second_num = NULL;
+	CFArrayRef data_rate_limits = NULL;
+	void *nums[2];
+	enum venc_rate_control rate_control;
+
+	target_bitrate_num = CFNumberCreate(
+		kCFAllocatorDefault, kCFNumberSInt32Type, &target_bitrate);
+	if (target_bitrate_num == NULL) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	bytes_per_second_num = CFNumberCreate(
+		kCFAllocatorDefault, kCFNumberSInt64Type, &bytes_per_second);
+	if (bytes_per_second_num == NULL) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	one_second_num = CFNumberCreate(
+		kCFAllocatorDefault, kCFNumberSInt64Type, &one_second);
+	if (one_second_num == NULL) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	nums[0] = (void *)bytes_per_second_num;
+	nums[1] = (void *)one_second_num;
+	data_rate_limits = CFArrayCreate(kCFAllocatorDefault,
+					 (const void **)nums,
+					 2,
+					 &kCFTypeArrayCallBacks);
+	if (data_rate_limits == NULL) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	switch (self->base->config.encoding) {
+	case VDEF_ENCODING_H264:
+		rate_control = self->base->config.h264.rate_control;
+		break;
+	case VDEF_ENCODING_H265:
+		rate_control = self->base->config.h265.rate_control;
+		break;
+	default:
+		ret = -ENOSYS;
+		goto out;
+	}
+
+	switch (rate_control) {
+	case VENC_RATE_CONTROL_CBR:
+	/* Note: kVTCompressionPropertyKey_ConstantBitRate is not
+	 * recommended as encoder will pad stream with empty data */
+	case VENC_RATE_CONTROL_VBR:
+		VENC_LOGD("%s: %u (max: %u)",
+			  __func__,
+			  target_bitrate,
+			  max_bitrate);
+		osstatus = VTSessionSetProperty(
+			self->compress_ref,
+			kVTCompressionPropertyKey_AverageBitRate,
+			target_bitrate_num);
+		if (osstatus != noErr) {
+			ret = -ENOSYS;
+			VENC_LOGE("CBR/VBR is not supported");
+			goto out;
+		}
+		osstatus = VTSessionSetProperty(
+			self->compress_ref,
+			kVTCompressionPropertyKey_DataRateLimits,
+			data_rate_limits);
+		if (osstatus != noErr &&
+		    self->base->config.encoding != VDEF_ENCODING_H265) {
+			ret = -ENOSYS;
+			VENC_LOGE("unable to set max bitrate");
+			goto out;
+		}
+		break;
+	case VENC_RATE_CONTROL_CQ:
+		ret = -ENOSYS;
+		VENC_LOGE("CQ is not supported");
+		goto out;
+	default:
+		ret = -EPROTO;
+		VENC_LOGE("invalid rate_control: %d",
+			  self->base->config.h264.rate_control);
+		goto out;
+	}
+
+	ret = 0;
+
+out:
+	if (target_bitrate_num != NULL)
+		CFRelease(target_bitrate_num);
+	if (bytes_per_second_num != NULL)
+		CFRelease(bytes_per_second_num);
+	if (one_second_num != NULL)
+		CFRelease(one_second_num);
+	if (data_rate_limits != NULL)
+		CFRelease(data_rate_limits);
+	return ret;
+}
+
+
+static void compression_method_destroy(struct venc_videotoolbox *self)
+{
+	if (self == NULL || self->compress_ref == NULL)
+		return;
+
+	VTCompressionSessionInvalidate(self->compress_ref);
+	CFRelease(self->compress_ref);
+	self->compress_ref = NULL;
+}
+
+
+static int compression_session_create(struct venc_videotoolbox *self,
+				      int creation)
+{
+	int ret = 0;
+	OSStatus osstatus;
+	CFMutableDictionaryRef buffer_attr = NULL;
+	CMVideoCodecType codec_type;
+	CFDictionaryRef properties = NULL;
+	unsigned int max_bitrate;
+	unsigned int target_bitrate;
+	unsigned int profile;
+	unsigned int level;
+	float gop_length_sec;
+#if !TARGET_OS_IPHONE
+	const void *keys[] = {
+		kVTCompressionPropertyKey_RealTime,
+		/* codecheck_ignore[LONG_LINE] */
+		kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
+		kVTCompressionPropertyKey_AllowFrameReordering,
+	};
+	const void *values[] = {
+		kCFBooleanTrue,
+		kCFBooleanTrue,
+		kCFBooleanFalse,
+	};
+#else
+	const void *keys[] = {
+		kVTCompressionPropertyKey_RealTime,
+		kVTCompressionPropertyKey_AllowFrameReordering,
+	};
+	const void *values[] = {
+		kCFBooleanTrue,
+		kCFBooleanFalse,
+	};
+#endif /* !TARGET_OS_IPHONE */
+	int properties_size = SIZEOF_ARRAY(keys);
+
+	switch (self->base->config.encoding) {
+	case VDEF_ENCODING_H264:
+		codec_type = kCMVideoCodecType_H264;
+		profile = self->base->config.h264.profile;
+		level = self->base->config.h264.level;
+		max_bitrate = self->base->config.h264.max_bitrate;
+		target_bitrate = self->base->config.h264.target_bitrate;
+		gop_length_sec = self->base->config.h264.gop_length_sec;
+		if (creation) {
+			self->dynconf = (struct venc_dyn_config){
+				.qp = self->base->config.h264.qp,
+				.target_bitrate = target_bitrate,
+				.decimation =
+					self->base->config.h264.decimation,
+			};
+		}
+		break;
+	case VDEF_ENCODING_H265:
+		codec_type = kCMVideoCodecType_HEVC;
+		profile = self->base->config.h265.profile;
+		level = self->base->config.h265.level;
+		max_bitrate = self->base->config.h265.max_bitrate;
+		target_bitrate = self->base->config.h265.target_bitrate;
+		gop_length_sec = self->base->config.h265.gop_length_sec;
+		if (creation) {
+			self->dynconf = (struct venc_dyn_config){
+				.qp = self->base->config.h265.qp,
+				.target_bitrate = target_bitrate,
+				.decimation =
+					self->base->config.h265.decimation,
+			};
+		}
+		break;
+	default:
+		ret = -EPROTO;
+		VENC_LOG_ERRNO("invalid codec type", -ret);
+		goto out;
+	}
+	if (!creation && self->dynconf.target_bitrate != 0) {
+		max_bitrate = self->dynconf.target_bitrate;
+		target_bitrate = self->dynconf.target_bitrate;
+	}
+
+	buffer_attr = buffer_attr_create(self);
+	if (buffer_attr == NULL) {
+		ret = -ENOMEM;
+		VENC_LOG_ERRNO("buffer_attr_create", -ret);
+		goto out;
+	}
+
+	osstatus = VTCompressionSessionCreate(
+		kCFAllocatorDefault,
+		self->base->config.input.info.resolution.width,
+		self->base->config.input.info.resolution.height,
+		codec_type,
+		NULL,
+		buffer_attr,
+		kCFAllocatorDefault,
+		frame_output_cb,
+		self,
+		&self->compress_ref);
+	if (osstatus == kVTCouldNotFindVideoEncoderErr) {
+		ret = -EINVAL;
+		VENC_LOG_ERRNO(
+			"VTCompressionSessionCreate error: "
+			"Encoding not supported status=%d",
+			-ret,
+			(int)osstatus);
+		goto out;
+	} else if (osstatus != noErr) {
+		ret = -EPROTO;
+		VENC_LOG_ERRNO("VTCompressionSessionCreate status=%d",
+			       -ret,
+			       (int)osstatus);
+		goto out;
+	}
+
+	if (creation)
+		VENC_LOGI("videotoolbox implementation");
+
+	properties = CFDictionaryCreate(
+		kCFAllocatorDefault, keys, values, properties_size, NULL, NULL);
+	if (properties == NULL) {
+		ret = -ENOSYS;
+		VENC_LOG_ERRNO("CFDictionaryCreate", -ret);
+		goto out;
+	}
+
+	osstatus = VTSessionSetProperties(self->compress_ref, properties);
+	if (osstatus != noErr) {
+		ret = -EPROTO;
+		VENC_LOG_ERRNO("VTSessionSetProperties status=%d",
+			       EPROTO,
+			       (int)osstatus);
+		goto out;
+	}
+
+	/* Set profile and level */
+	ret = set_profile_level(self, profile, level);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("set_profile_level", -ret);
+		goto out;
+	}
+
+	/* Set entropy coding */
+	ret = set_entropy_coding(self);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("set_entropy_coding", -ret);
+		goto out;
+	}
+
+	/* Set color, transfer, matrix */
+	ret = set_color_transfer_matrix(
+		self,
+		self->base->config.input.info.color_primaries,
+		self->base->config.input.info.transfer_function,
+		self->base->config.input.info.matrix_coefs);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("set_color_transfer_matrix", -ret);
+		goto out;
+	}
+
+	/* Set RC mode and bitrates */
+	ret = set_bitrates(self, target_bitrate, max_bitrate);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("set_bitrates", -ret);
+		goto out;
+	}
+
+	/* Set GOP */
+	ret = set_gop(self, gop_length_sec);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("set_gop", -ret);
+		goto out;
+	}
+
+	osstatus =
+		VTCompressionSessionPrepareToEncodeFrames(self->compress_ref);
+	if (osstatus != noErr) {
+		ret = -EPROTO;
+		VENC_LOG_ERRNO(
+			"VTCompressionSessionPrepareToEncodeFrames status=%d",
+			-ret,
+			(int)osstatus);
+		goto out;
+	}
+
+out:
+	if (properties)
+		CFRelease(properties);
+
+	if (buffer_attr)
+		CFRelease(buffer_attr);
+
+	return ret;
+}
+
+
+static int compression_session_renew(struct venc_videotoolbox *self)
+{
+	compression_method_destroy(self);
+	return compression_session_create(self, 0);
 }
 
 
 static int buffer_push_one(struct venc_videotoolbox *self,
 			   struct mbuf_raw_video_frame *in_frame)
 {
-	int ret = 0;
+	int ret = 0, err;
 	OSStatus osstatus;
-	struct vdef_raw_frame info;
-	const void *void_data;
-	const uint8_t *in_data, *data_addr[3];
+	struct vdef_raw_frame info = {};
+	const uint8_t *data_addr[VDEF_RAW_MAX_PLANE_COUNT] = {};
 	struct timespec cur_ts = {0, 0};
 	uint64_t ts_us;
-	size_t len, buf_size, widths[3], heights[3];
-	int plane_count, fmt;
-	CVPixelBufferRef pixelBufferOut = NULL;
+	size_t plane_size[VDEF_RAW_MAX_PLANE_COUNT] = {};
+	unsigned int plane_count;
 	CMTime presentationTimeStamp;
-	struct frame_data *in_frame_data = NULL;
+	bool idr_requested = false;
+	CFDictionaryRef encode_props = NULL;
+	CVPixelBufferPoolRef pool = NULL;
+	CVPixelBufferRef pix_buf = NULL;
+	bool pix_buf_locked = false;
+	int ref_count = 1;
 
-	ULOG_ERRNO_RETURN_ERR_IF(in_frame == NULL, EINVAL);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(in_frame == NULL, EINVAL);
+
+	/* Frame skipping in case of decimation */
+	if (self->input_frame_cnt % self->dynconf.decimation != 0) {
+		self->input_frame_cnt++;
+		return 0;
+	}
+	self->input_frame_cnt++;
 
 	ret = mbuf_raw_video_frame_get_frame_info(in_frame, &info);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_get_frame_info", -ret);
-		return ret;
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_frame_info", -ret);
+		goto out;
 	}
-
-	/* Frame skipping in case of decimation */
-	if (self->input_frame_cnt % self->base->config.h264.decimation != 0) {
-		self->input_frame_cnt++;
-		return ret;
-	}
-	self->input_frame_cnt++;
 
 	time_get_monotonic(&cur_ts);
 	time_timespec_to_us(&cur_ts, &ts_us);
 
-	ret = mbuf_raw_video_frame_add_ancillary_buffer(
+	err = mbuf_raw_video_frame_add_ancillary_buffer(
 		in_frame,
 		VENC_ANCILLARY_KEY_DEQUEUE_TIME,
 		&ts_us,
 		sizeof(ts_us));
-	if (ret < 0)
-		ULOG_ERRNO("mbuf_raw_video_frame_add_ancillary_buffer", -ret);
+	if (err < 0)
+		VENC_LOGW_ERRNO("mbuf_raw_video_frame_add_ancillary_buffer",
+				-err);
 
-	if (!vdef_raw_format_intersect(
-		    &info.format, supported_formats, NB_SUPPORTED_FORMATS)) {
-		ret = -ENOSYS;
-		ULOG_ERRNO(
-			"unsupported format:"
-			" " VDEF_RAW_FORMAT_TO_STR_FMT,
-			-ret,
-			VDEF_RAW_FORMAT_TO_STR_ARG(&info.format));
-		return ret;
+	plane_count = vdef_get_raw_frame_plane_count(&info.format);
+	if (plane_count == 0) {
+		ret = -EPROTO;
+		VENC_LOG_ERRNO("vdef_get_raw_frame_plane_count", -ret);
+		goto out;
 	}
 
-	ret = mbuf_raw_video_frame_get_plane(in_frame, 0, &void_data, &len);
-	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_get_plane_0", -ret);
-		return ret;
-	}
-
-	in_data = void_data;
-	widths[0] = info.info.resolution.width;
-	heights[0] = info.info.resolution.height;
-	data_addr[0] = (uint8_t *)in_data;
-
-	ret = mbuf_raw_video_frame_release_plane(in_frame, 0, void_data);
-	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_release_plane_0", -ret);
-		return ret;
-	}
-
-	ret = mbuf_raw_video_frame_get_plane(in_frame, 1, &void_data, &len);
-	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_get_plane_1", -ret);
-		return ret;
-	}
-
-	in_data = void_data;
-	widths[1] = (info.info.resolution.width + 1) / 2;
-	heights[1] = (info.info.resolution.height + 1) / 2;
-	data_addr[1] = (uint8_t *)in_data;
-
-	ret = mbuf_raw_video_frame_release_plane(in_frame, 1, void_data);
-	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_release_plane_1", -ret);
-		return ret;
-	}
-
-	if (vdef_raw_format_cmp(&info.format, &vdef_nv12)) {
-		plane_count = 2;
-		if (self->base->config.input.info.full_range)
-			fmt = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
-		else
-			fmt = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
-	} else if (vdef_raw_format_cmp(&info.format, &vdef_i420)) {
-		plane_count = 3;
-
+	for (unsigned int i = 0; i < plane_count; i++) {
 		ret = mbuf_raw_video_frame_get_plane(
-			in_frame, 2, &void_data, &len);
+			in_frame,
+			i,
+			(const void **)&data_addr[i],
+			&plane_size[i]);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_get_plane_2", -ret);
-			return ret;
+			VENC_LOG_ERRNO(
+				"mbuf_raw_video_frame_get_plane(%u)", -ret, i);
+			goto out;
 		}
+	}
 
-		in_data = void_data;
-		widths[2] = (info.info.resolution.width + 1) / 2;
-		heights[2] = (info.info.resolution.height + 1) / 2;
-		data_addr[2] = (uint8_t *)in_data;
-
-		ret = mbuf_raw_video_frame_release_plane(
-			in_frame, 2, void_data);
-		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_release_plane_2",
-				   -ret);
-			return ret;
+	pool = VTCompressionSessionGetPixelBufferPool(self->compress_ref);
+	if (pool == NULL) {
+		osstatus = VTCompressionSessionPrepareToEncodeFrames(
+			self->compress_ref);
+		if (osstatus == kVTInvalidSessionErr) {
+			ret = compression_session_renew(self);
+			if (ret < 0) {
+				ret = -EIO;
+				VENC_LOG_ERRNO("compression_session_renew",
+					       -ret);
+				goto out;
+			}
+			pool = VTCompressionSessionGetPixelBufferPool(
+				self->compress_ref);
+			if (pool == NULL) {
+				ret = -EPROTO;
+				VENC_LOG_ERRNO(
+					"VTCompressionSessionGetPixelBufferPool",
+					-ret);
+				goto out;
+			} else {
+				VENC_LOGI(
+					"VT session restarted because of a "
+					"kVTInvalidSessionErr error");
+			}
+		} else {
+			ret = -EPROTO;
+			VENC_LOG_ERRNO("VTCompressionSessionGetPixelBufferPool",
+				       -ret);
+			goto out;
 		}
-
-		if (self->base->config.input.info.full_range)
-			fmt = kCVPixelFormatType_420YpCbCr8PlanarFullRange;
-		else
-			fmt = kCVPixelFormatType_420YpCbCr8Planar;
 	}
 
-	/* Create the pixel buffer */
-	ret = mbuf_raw_video_frame_get_packed_buffer(
-		in_frame, &void_data, &buf_size);
-	if (ret != 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_get_packed_buffer", -ret);
-		return ret;
-	}
-	in_data = void_data;
-	in_frame_data = calloc(1, sizeof(struct frame_data));
-	if (!in_frame_data) {
-		ret = -ENOMEM;
-		ULOG_ERRNO("calloc", -ret);
-		goto out;
-	}
-	in_frame_data->frame = in_frame;
-	in_frame_data->data = void_data;
-	ret = mbuf_raw_video_frame_ref(in_frame);
-	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_ref", -ret);
-		free(in_frame_data);
+	ret = CVPixelBufferPoolCreatePixelBuffer(NULL, pool, &pix_buf);
+	if (ret != kCVReturnSuccess) {
+		VENC_LOG_ERRNO("CVPixelBufferPoolCreatePixelBuffer", -ret);
 		goto out;
 	}
 
-	ret = CVPixelBufferCreateWithPlanarBytes(kCFAllocatorDefault,
-						 info.info.resolution.width,
-						 info.info.resolution.height,
-						 fmt,
-						 (uint8_t *)in_data,
-						 buf_size,
-						 plane_count,
-						 (void **)data_addr,
-						 widths,
-						 heights,
-						 info.plane_stride,
-						 frame_data_release,
-						 in_frame_data,
-						 NULL,
-						 &pixelBufferOut);
-	if (ret < 0) {
-		ULOG_ERRNO("CVPixelBufferCreateWithPlanarBytes", -ret);
+	/* Fill buffer */
+
+	ret = CVPixelBufferLockBaseAddress(pix_buf, 0);
+	if (ret != kCVReturnSuccess) {
+		VENC_LOG_ERRNO("CVPixelBufferLockBaseAddress", -ret);
 		goto out;
+	}
+	pix_buf_locked = true;
+
+	if (CVPixelBufferIsPlanar(pix_buf)) {
+		unsigned int buf_plane_count =
+			CVPixelBufferGetPlaneCount(pix_buf);
+		if (buf_plane_count != plane_count) {
+			VENC_LOGE("plane count mismatch (expecting %d, got %d)",
+				  plane_count,
+				  buf_plane_count);
+			ret = -EPROTO;
+			goto out;
+		}
+		for (unsigned int i = 0; i < plane_count; i++) {
+			uint8_t *plane_dst_addr =
+				(uint8_t *)CVPixelBufferGetBaseAddressOfPlane(
+					pix_buf, i);
+			if (plane_dst_addr == NULL) {
+				ret = -EPROTO;
+				VENC_LOG_ERRNO(
+					"CVPixelBufferGetBaseAddress"
+					"OfPlane(%u)",
+					-ret,
+					i);
+				goto out;
+			}
+			size_t dst_stride =
+				CVPixelBufferGetBytesPerRowOfPlane(pix_buf, i);
+			if (dst_stride == 0) {
+				ret = -EPROTO;
+				VENC_LOG_ERRNO(
+					"CVPixelBufferGetBytesPerRow"
+					"OfPlane(%u)",
+					-ret,
+					i);
+				goto out;
+			}
+			/* Copy plane with stride */
+			if (info.plane_stride[i] == 0) {
+				ret = -EPROTO;
+				VENC_LOG_ERRNO("invalid stride", -ret);
+				goto out;
+			}
+			unsigned int nlines =
+				plane_size[i] / info.plane_stride[i];
+			for (unsigned int j = 0; j < nlines; j++) {
+				memcpy(plane_dst_addr + (j * dst_stride),
+				       data_addr[i] +
+					       (j * info.plane_stride[i]),
+				       MIN(dst_stride, info.plane_stride[i]));
+			}
+		}
+	} else {
+		uint8_t *dst_addr = CVPixelBufferGetBaseAddress(pix_buf);
+		if (dst_addr == NULL) {
+			ret = -EPROTO;
+			VENC_LOG_ERRNO("CVPixelBufferGetBaseAddress", -ret);
+			goto out;
+		}
+		size_t dst_stride = CVPixelBufferGetBytesPerRow(pix_buf);
+		if (dst_stride == 0) {
+			ret = -EPROTO;
+			VENC_LOG_ERRNO("CVPixelBufferGetBytesPerRow", -ret);
+			goto out;
+		}
+		for (unsigned int i = 0; i < plane_count; i++) {
+			/* Copy plane with stride */
+			if (info.plane_stride[i] == 0) {
+				ret = -EPROTO;
+				VENC_LOG_ERRNO("invalid stride", -ret);
+				goto out;
+			}
+			unsigned int nlines =
+				plane_size[i] / info.plane_stride[i];
+			for (unsigned int j = 0; j < nlines; j++) {
+				memcpy(dst_addr,
+				       data_addr[i] +
+					       (j * info.plane_stride[i]),
+				       MIN(dst_stride, info.plane_stride[i]));
+				dst_addr += dst_stride;
+			}
+		}
+	}
+
+	ret = CVPixelBufferUnlockBaseAddress(pix_buf, 0);
+	if (ret != kCVReturnSuccess) {
+		VENC_LOG_ERRNO("CVPixelBufferUnlockBaseAddress", -ret);
+		goto out;
+	}
+	pix_buf_locked = false;
+
+	if (atomic_load(&self->idr_requested)) {
+		const void *keys[] = {kVTEncodeFrameOptionKey_ForceKeyFrame};
+		const void *vals[] = {kCFBooleanTrue};
+		encode_props = CFDictionaryCreate(kCFAllocatorDefault,
+						  keys,
+						  vals,
+						  SIZEOF_ARRAY(keys),
+						  NULL,
+						  NULL);
+		if (encode_props == NULL) {
+			ret = -ENOMEM;
+			VENC_LOG_ERRNO("CFDictionaryCreate", -ret);
+			goto out;
+		}
+		idr_requested = true;
 	}
 
 	/* Push the frame */
 	presentationTimeStamp =
 		CMTimeMake(info.info.timestamp, info.info.timescale);
 
+	/* Note: ref-count is incremented here as frame is passed to the
+	 * VTCompressionSession as userdata and unref'ed when output */
 	ret = mbuf_raw_video_frame_ref(in_frame);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_ref", -ret);
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_ref", -ret);
 		goto out;
 	}
+	ref_count++;
 
 	osstatus = VTCompressionSessionEncodeFrame(self->compress_ref,
-						   pixelBufferOut,
+						   pix_buf,
 						   presentationTimeStamp,
 						   kCMTimeIndefinite,
-						   NULL,
+						   encode_props,
 						   in_frame,
 						   NULL);
 	if (osstatus != noErr) {
 		ret = -EPROTO;
-		ULOG_ERRNO("VTCompressionSessionEncodeFrame status=%d",
-			   -ret,
-			   (int)osstatus);
+		VENC_LOG_ERRNO("VTCompressionSessionEncodeFrame status=%d",
+			       -ret,
+			       (int)osstatus);
 		goto out;
 	}
 
+	self->base->counters.pushed++;
+	if (idr_requested)
+		atomic_store(&self->idr_requested, false);
+
+	ret = 0;
+
 out:
-	if (pixelBufferOut)
-		CFRelease(pixelBufferOut);
-	if (void_data)
-		mbuf_raw_video_frame_release_packed_buffer(in_frame, void_data);
-	else if (in_frame_data)
-		free(in_frame_data);
+	if (pix_buf) {
+		if (pix_buf_locked) {
+			err = CVPixelBufferUnlockBaseAddress(pix_buf, 0);
+			if (err != kCVReturnSuccess) {
+				VENC_LOG_ERRNO("CVPixelBufferUnlockBaseAddress",
+					       -err);
+			}
+		}
+		CFRelease(pix_buf);
+	}
+	if (encode_props)
+		CFRelease(encode_props);
+	if (in_frame) {
+		for (unsigned int i = 0; i < SIZEOF_ARRAY(data_addr); i++) {
+			if (data_addr[i] == NULL)
+				continue;
+			err = mbuf_raw_video_frame_release_plane(
+				in_frame, i, data_addr[i]);
+			if (err < 0) {
+				VENC_LOG_ERRNO(
+					"mbuf_raw_video_frame"
+					"_release_plane(%u)",
+					-err,
+					i);
+			}
+		}
+		if (ret < 0) {
+			while (ref_count > 0) {
+				err = mbuf_raw_video_frame_unref(in_frame);
+				if (err < 0)
+					VENC_LOG_ERRNO(
+						"mbuf_raw_video_frame_unref",
+						-err);
+				ref_count--;
+			}
+		}
+	}
 	return ret;
 }
 
 
 static void check_input_queue(struct venc_videotoolbox *self)
 {
-	int ret;
+	int ret, err;
 	struct mbuf_raw_video_frame *in_frame;
 
 	ret = mbuf_raw_video_frame_queue_peek(self->in_queue, &in_frame);
 	while (ret >= 0) {
-		/* Push the input frame */
+		/* Push the input frame; frame is unref on error only */
 		/* Encode the frame */
 		ret = buffer_push_one(self, in_frame);
 		if (ret < 0) {
 			if (ret != -EAGAIN)
-				ULOG_ERRNO("encode_frame", -ret);
+				VENC_LOG_ERRNO("buffer_push_one", -ret);
 			ret = -ENOSPC;
 			break;
 		}
 		if (in_frame) {
-			mbuf_raw_video_frame_unref(in_frame);
+			err = mbuf_raw_video_frame_unref(in_frame);
+			if (err < 0) {
+				VENC_LOG_ERRNO("mbuf_raw_video_frame_unref",
+					       -ret);
+			}
 			/* Pop the frame for real */
 			ret = mbuf_raw_video_frame_queue_pop(self->in_queue,
 							     &in_frame);
 			if (ret < 0) {
-				ULOG_ERRNO("mbuf_raw_video_frame_queue_pop",
-					   -ret);
+				VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_pop",
+					       -ret);
 				break;
 			}
-			mbuf_raw_video_frame_unref(in_frame);
+			err = mbuf_raw_video_frame_unref(in_frame);
+			if (err < 0) {
+				VENC_LOG_ERRNO("mbuf_raw_video_frame_unref",
+					       -ret);
+			}
 		}
 		/* Peek the next frame */
 		ret = mbuf_raw_video_frame_queue_peek(self->in_queue,
 						      &in_frame);
 		if (ret < 0 && ret != -EAGAIN && ret != -ENOSPC)
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_peek", -ret);
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_peek", -ret);
 		if (self->flush && ret == -EAGAIN) {
 			in_frame = NULL;
 			ret = do_flush(self);
 			if (ret < 0)
-				ULOG_ERRNO("do_flush", -ret);
+				VENC_LOG_ERRNO("do_flush", -ret);
 			break;
 		}
+	}
+
+	if (ret == -EAGAIN && atomic_load(&self->flush) &&
+	    !atomic_load(&self->flush_discard)) {
+		ret = do_flush(self);
+		if (ret < 0)
+			VENC_LOG_ERRNO("do_flush", -ret);
 	}
 }
 
@@ -1038,20 +1739,26 @@ static void *encoder_thread(void *ptr)
 	struct pomp_evt *in_queue_evt = NULL;
 	bool flush = false;
 
+#if !TARGET_OS_IPHONE
+	ret = pthread_setname_np("venc_vtoolbox");
+	if (ret != 0)
+		VENC_LOG_ERRNO("pthread_setname_np", ret);
+#endif
+
 	loop = pomp_loop_new();
 	if (!loop) {
-		ULOG_ERRNO("pomp_loop_new", ENOMEM);
+		VENC_LOG_ERRNO("pomp_loop_new", ENOMEM);
 		goto exit;
 	}
 	ret = mbuf_raw_video_frame_queue_get_event(self->in_queue,
 						   &in_queue_evt);
 	if (ret != 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_queue_get_event", -ret);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_queue_get_event", -ret);
 		goto exit;
 	}
 	ret = pomp_evt_attach_to_loop(in_queue_evt, loop, input_event_cb, self);
 	if (ret != 0) {
-		ULOG_ERRNO("pomp_evt_attach_to_loop", -ret);
+		VENC_LOG_ERRNO("pomp_evt_attach_to_loop", -ret);
 		goto exit;
 	}
 
@@ -1061,7 +1768,7 @@ static void *encoder_thread(void *ptr)
 		if ((flush) && (atomic_load(&self->flush_discard))) {
 			ret = do_flush(self);
 			if (ret < 0)
-				ULOG_ERRNO("do_flush", -ret);
+				VENC_LOG_ERRNO("do_flush", -ret);
 			continue;
 		}
 
@@ -1070,7 +1777,7 @@ static void *encoder_thread(void *ptr)
 									    : 5;
 		ret = pomp_loop_wait_and_process(loop, timeout);
 		if (ret < 0 && ret != -ETIMEDOUT) {
-			ULOG_ERRNO("pomp_loop_wait_and_process", -ret);
+			VENC_LOG_ERRNO("pomp_loop_wait_and_process", -ret);
 			if (!self->should_stop) {
 				/* Avoid looping on errors */
 				usleep(5000);
@@ -1087,18 +1794,18 @@ static void *encoder_thread(void *ptr)
 	};
 	ret = mbox_push(self->mbox, &message);
 	if (ret < 0)
-		ULOG_ERRNO("mbox_push", -ret);
+		VENC_LOG_ERRNO("mbox_push", -ret);
 
 exit:
 	if (in_queue_evt != NULL) {
 		ret = pomp_evt_detach_from_loop(in_queue_evt, loop);
 		if (ret != 0)
-			ULOG_ERRNO("pomp_evt_detach_from_loop", -ret);
+			VENC_LOG_ERRNO("pomp_evt_detach_from_loop", -ret);
 	}
 	if (loop != NULL) {
 		ret = pomp_loop_destroy(loop);
 		if (ret != 0)
-			ULOG_ERRNO("pomp_loop_destroy", -ret);
+			VENC_LOG_ERRNO("pomp_loop_destroy", -ret);
 	}
 
 	return NULL;
@@ -1125,11 +1832,10 @@ static int get_supported_input_formats(const struct vdef_raw_format **formats)
 
 static int flush(struct venc_encoder *base, int discard_)
 {
-	struct venc_videotoolbox *self;
+	struct venc_videotoolbox *self = NULL;
 	bool discard = discard_;
 
-	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
-
+	VENC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 	self = base->derived;
 
 	atomic_store(&self->flush, true);
@@ -1141,10 +1847,9 @@ static int flush(struct venc_encoder *base, int discard_)
 
 static int stop(struct venc_encoder *base)
 {
-	struct venc_videotoolbox *self;
+	struct venc_videotoolbox *self = NULL;
 
-	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
-
+	VENC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 	self = base->derived;
 
 	/* Stop the encoding thread */
@@ -1157,9 +1862,9 @@ static int stop(struct venc_encoder *base)
 static int destroy(struct venc_encoder *base)
 {
 	int err;
-	struct venc_videotoolbox *self;
+	struct venc_videotoolbox *self = NULL;
 
-	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 
 	self = base->derived;
 	if (self == NULL)
@@ -1167,22 +1872,20 @@ static int destroy(struct venc_encoder *base)
 
 	err = stop(base);
 	if (err != 0)
-		ULOG_ERRNO("stop", -err);
-	if (self->compress_ref) {
-		VTCompressionSessionInvalidate(self->compress_ref);
-		CFRelease(self->compress_ref);
-	}
+		VENC_LOG_ERRNO("stop", -err);
+
+	compression_method_destroy(self);
 
 	if (self->ps_lock_created) {
 		err = pthread_mutex_destroy(&self->ps_lock);
 		if (err != 0)
-			ULOG_ERRNO("pthread_mutex_destroy", err);
+			VENC_LOG_ERRNO("pthread_mutex_destroy", err);
 	}
 
 	if (self->thread_launched) {
 		err = pthread_join(self->thread, NULL);
 		if (err != 0)
-			ULOG_ERRNO("pthread_join", err);
+			VENC_LOG_ERRNO("pthread_join", err);
 	}
 
 	/* Free the resources */
@@ -1191,34 +1894,36 @@ static int destroy(struct venc_encoder *base)
 		err = pomp_evt_detach_from_loop(self->out_queue_evt,
 						base->loop);
 		if (err < 0)
-			ULOG_ERRNO("pomp_evt_detach_from_loop", -err);
+			VENC_LOG_ERRNO("pomp_evt_detach_from_loop", -err);
 	}
 	if (self->out_queue != NULL) {
 		err = mbuf_coded_video_frame_queue_destroy(self->out_queue);
 		if (err < 0)
-			ULOG_ERRNO(
+			VENC_LOG_ERRNO(
 				"mbuf_coded_video_frame_queue_destroy:output",
 				-err);
 	}
 	if (self->in_queue != NULL) {
 		err = mbuf_raw_video_frame_queue_destroy(self->in_queue);
 		if (err < 0)
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_destroy:input",
-				   -err);
+			VENC_LOG_ERRNO(
+				"mbuf_raw_video_frame_queue_destroy:input",
+				-err);
 	}
 	if (self->mbox != NULL) {
 		err = pomp_loop_remove(base->loop,
 				       mbox_get_read_fd(self->mbox));
 		if (err < 0)
-			ULOG_ERRNO("pomp_loop_remove", -err);
+			VENC_LOG_ERRNO("pomp_loop_remove", -err);
 		mbox_destroy(self->mbox);
 	}
 
 	err = pomp_loop_idle_remove_by_cookie(base->loop, self);
 	if (err < 0)
-		ULOG_ERRNO("pomp_loop_idle_remove_by_cookie", -err);
+		VENC_LOG_ERRNO("pomp_loop_idle_remove_by_cookie", -err);
 
 	free(self);
+	base->derived = NULL;
 
 	return 0;
 }
@@ -1232,7 +1937,7 @@ static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 	struct vdef_raw_frame info;
 	struct venc_videotoolbox *self = userdata;
 
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, false);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, false);
 
 	if (atomic_load(&self->flush) || atomic_load(&self->should_stop))
 		return false;
@@ -1252,7 +1957,7 @@ static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 	/* Input frame must be packed */
 	ret = mbuf_raw_video_frame_get_packed_buffer(frame, &tmp, &tmplen);
 	if (ret != 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_get_packed_buffer", -ret);
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_packed_buffer", -ret);
 		return false;
 	}
 	mbuf_raw_video_frame_release_packed_buffer(frame, tmp);
@@ -1268,46 +1973,23 @@ static int create(struct venc_encoder *base)
 {
 	int ret = 0;
 	struct venc_videotoolbox *self = NULL;
-	OSStatus osstatus;
 	struct mbuf_raw_video_frame_queue_args queue_args = {
 		.filter = input_filter,
 	};
-	CMVideoCodecType codec_type;
-	CFMutableDictionaryRef buffer_attr = NULL;
-#if !TARGET_OS_IPHONE
-	const void *keys[] = {
-		kVTCompressionPropertyKey_RealTime,
-		/* codecheck_ignore[LONG_LINE] */
-		kVTVideoEncoderSpecification_EnableHardwareAcceleratedVideoEncoder,
-		kVTCompressionPropertyKey_AllowFrameReordering,
-	};
-	const void *values[] = {
-		kCFBooleanTrue,
-		kCFBooleanTrue,
-		kCFBooleanFalse,
-	};
-#else
-	const void *keys[] = {
-		kVTCompressionPropertyKey_RealTime,
-		kVTCompressionPropertyKey_AllowFrameReordering,
-	};
-	const void *values[] = {
-		kCFBooleanTrue,
-		kCFBooleanFalse,
-	};
-#endif /* !TARGET_OS_IPHONE */
-	int properties_size = SIZEOF_ARRAY(keys);
-	CFDictionaryRef properties = NULL;
 
+	(void)pthread_once(&compat_keys_is_init, initialize_compat_keys);
 	(void)pthread_once(&supported_formats_is_init,
 			   initialize_supported_formats);
 
-	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 
-	if (base->config.encoding != VDEF_ENCODING_H264 &&
-	    base->config.encoding != VDEF_ENCODING_H265) {
+	switch (base->config.encoding) {
+	case VDEF_ENCODING_H264:
+	case VDEF_ENCODING_H265:
+		break;
+	default:
 		ret = -EINVAL;
-		ULOG_ERRNO("unsupported encoding", -ret);
+		VENC_LOG_ERRNO("unsupported encoding", -ret);
 		return ret;
 	}
 
@@ -1317,12 +1999,13 @@ static int create(struct venc_encoder *base)
 
 	base->derived = self;
 	self->base = base;
+	atomic_init(&self->idr_requested, false);
 	queue_args.filter_userdata = self;
 
 	self->mbox = mbox_new(sizeof(struct venc_videotoolbox_message));
 	if (self->mbox == NULL) {
 		ret = -ENOMEM;
-		ULOG_ERRNO("mbox_new", -ret);
+		VENC_LOG_ERRNO("mbox_new", -ret);
 		goto error;
 	}
 	ret = pomp_loop_add(base->loop,
@@ -1331,39 +2014,39 @@ static int create(struct venc_encoder *base)
 			    &mbox_cb,
 			    self);
 	if (ret < 0) {
-		ULOG_ERRNO("pomp_loop_add", -ret);
+		VENC_LOG_ERRNO("pomp_loop_add", -ret);
 		goto error;
 	}
 
 	ret = mbuf_coded_video_frame_queue_new(&self->out_queue);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_queue_new:output", -ret);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_queue_new:output", -ret);
 		goto error;
 	}
 	ret = mbuf_coded_video_frame_queue_get_event(self->out_queue,
 						     &self->out_queue_evt);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_queue_get_event", -ret);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_queue_get_event", -ret);
 		goto error;
 	}
 	ret = pomp_evt_attach_to_loop(
 		self->out_queue_evt, base->loop, &out_queue_evt_cb, self);
 	if (ret < 0) {
-		ULOG_ERRNO("pomp_evt_attach_to_loop", -ret);
+		VENC_LOG_ERRNO("pomp_evt_attach_to_loop", -ret);
 		goto error;
 	}
 
 	ret = mbuf_raw_video_frame_queue_new_with_args(&queue_args,
 						       &self->in_queue);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_queue_new_with_args:input",
-			   -ret);
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_new_with_args:input",
+			       -ret);
 		goto error;
 	}
 
 	ret = pthread_mutex_init(&self->ps_lock, NULL);
 	if (ret) {
-		ULOG_ERRNO("pthread_mutex_init", ret);
+		VENC_LOG_ERRNO("pthread_mutex_init", ret);
 		goto error;
 	};
 	self->ps_lock_created = true;
@@ -1371,98 +2054,40 @@ static int create(struct venc_encoder *base)
 	ret = pthread_create(&self->thread, NULL, encoder_thread, self);
 	if (ret != 0) {
 		ret = -ret;
-		ULOG_ERRNO("pthread_create", -ret);
+		VENC_LOG_ERRNO("pthread_create", -ret);
 		goto error;
 	}
 	self->thread_launched = true;
 
-	switch (base->config.encoding) {
-	case VDEF_ENCODING_H264:
-		codec_type = kCMVideoCodecType_H264;
-		break;
-	case VDEF_ENCODING_H265:
-		codec_type = kCMVideoCodecType_HEVC;
-		break;
-	default:
-		break;
-	}
-
-	buffer_attr = buffer_attr_create(base->config.input.info.full_range);
-	if (buffer_attr == NULL) {
-		ret = -ENOMEM;
-		ULOG_ERRNO("buffer_attr_create", -ret);
+	ret = vdef_raw_format_to_videotoolbox(
+		&self->base->config.input.format,
+		self->base->config.input.info.full_range,
+		&self->vt_pixel_format);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("vdef_raw_format_to_videotoolbox", -ret);
 		goto error;
 	}
 
-	osstatus = VTCompressionSessionCreate(
-		kCFAllocatorDefault,
-		base->config.input.info.resolution.width,
-		base->config.input.info.resolution.height,
-		codec_type,
-		NULL,
-		buffer_attr,
-		kCFAllocatorDefault,
-		frame_output_cb,
-		self,
-		&self->compress_ref);
-	if (osstatus == kVTCouldNotFindVideoEncoderErr) {
-		ret = -EINVAL;
-		ULOG_ERRNO(
-			"VTCompressionSessionCreate error: "
-			"Encoding not supported status=%d",
-			-ret,
-			(int)osstatus);
-		goto error;
-	} else if (osstatus != noErr) {
-		ret = -EPROTO;
-		ULOG_ERRNO("VTCompressionSessionCreate status=%d",
-			   -ret,
-			   (int)osstatus);
+	ret = compression_session_create(self, 1);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("compression_session_create", -ret);
 		goto error;
 	}
 
-	properties = CFDictionaryCreate(
-		kCFAllocatorDefault, keys, values, properties_size, NULL, NULL);
-	if (properties == NULL) {
-		ret = -ENOSYS;
-		ULOG_ERRNO("CFDictionaryCreate", -ret);
-		goto error;
-	}
-
-	osstatus = VTSessionSetProperties(self->compress_ref, properties);
-	if (osstatus != noErr) {
-		ret = -EPROTO;
-		ULOG_ERRNO("VTSessionSetProperties status=%d",
-			   EPROTO,
-			   (int)osstatus);
-		goto error;
-	}
-
-	if (buffer_attr)
-		CFRelease(buffer_attr);
-	if (properties)
-		CFRelease(properties);
 	return 0;
 
 error:
-	/* Cleanup on error */
-	if (self->compress_ref != NULL) {
-		VTCompressionSessionInvalidate(self->compress_ref);
-		CFRelease(self->compress_ref);
-	}
-	if (buffer_attr != NULL)
-		CFRelease(buffer_attr);
-	if (properties)
-		CFRelease(properties);
 	destroy(base);
-	base->derived = NULL;
 	return ret;
 }
 
 
 static struct mbuf_pool *get_input_buffer_pool(struct venc_encoder *base)
 {
-	ULOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
+	struct venc_videotoolbox *self = NULL;
+
+	VENC_LOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
+	self = base->derived;
 
 	/* No input buffer pool allocated: use the application's */
 	return NULL;
@@ -1472,10 +2097,9 @@ static struct mbuf_pool *get_input_buffer_pool(struct venc_encoder *base)
 static struct mbuf_raw_video_frame_queue *
 get_input_buffer_queue(struct venc_encoder *base)
 {
-	struct venc_videotoolbox *self;
+	struct venc_videotoolbox *self = NULL;
 
-	ULOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
-
+	VENC_LOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
 	self = base->derived;
 
 	return self->in_queue;
@@ -1485,7 +2109,10 @@ get_input_buffer_queue(struct venc_encoder *base)
 static int get_dyn_config(struct venc_encoder *base,
 			  struct venc_dyn_config *config)
 {
-	struct venc_videotoolbox *self = base->derived;
+	struct venc_videotoolbox *self = NULL;
+
+	VENC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
+	self = base->derived;
 
 	*config = self->dynconf;
 
@@ -1496,39 +2123,44 @@ static int get_dyn_config(struct venc_encoder *base,
 static int set_dyn_config(struct venc_encoder *base,
 			  const struct venc_dyn_config *config)
 {
-	struct venc_videotoolbox *self = base->derived;
-	OSStatus osstatus;
-	CFNumberRef CFBitrate;
+	int ret;
+	struct venc_videotoolbox *self = NULL;
 
-	if (config->qp != 0)
+	VENC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
+	self = base->derived;
+
+	/* QP */
+	if ((config->qp != 0) && (config->qp != self->dynconf.qp)) {
+		VENC_LOGE("QP is not supported");
 		return -ENOSYS;
+	}
 
-	if (config->target_bitrate != 0) {
-		unsigned int decimation = config->decimation == 0
-						  ? self->dynconf.decimation
-						  : config->decimation;
-		uint32_t bitrate = config->target_bitrate * decimation;
-		CFBitrate = CFNumberCreate(
-			kCFAllocatorDefault, kCFNumberSInt32Type, &bitrate);
-		if (CFBitrate == NULL) {
-			ULOG_ERRNO("CFNumberCreate", ENOMEM);
-			return -ENOMEM;
-		}
-		osstatus = VTSessionSetProperty(
-			self->compress_ref,
-			kVTCompressionPropertyKey_AverageBitRate,
-			CFBitrate);
-		if (osstatus != noErr) {
-			ULOG_ERRNO("VTSessionSetProperty status=%d",
-				   EPROTO,
-				   (int)osstatus);
-			return -EPROTO;
+	/* Target bitrate */
+	if ((config->target_bitrate != 0) &&
+	    (config->target_bitrate != self->dynconf.target_bitrate)) {
+		ret = set_bitrates(
+			self, config->target_bitrate, config->target_bitrate);
+		if (ret < 0) {
+			VENC_LOG_ERRNO("set_bitrates", -ret);
+			return ret;
 		}
 		self->dynconf.target_bitrate = config->target_bitrate;
 	}
 
-	if (config->decimation != 0)
+	/* Decimation */
+	if ((config->decimation != 0) &&
+	    (config->decimation != self->dynconf.decimation))
 		self->dynconf.decimation = config->decimation;
+
+	return 0;
+}
+
+
+static int request_idr(struct venc_encoder *base)
+{
+	struct venc_videotoolbox *self = base->derived;
+
+	atomic_store(&self->idr_requested, true);
 
 	return 0;
 }
@@ -1545,4 +2177,5 @@ const struct venc_ops venc_videotoolbox_ops = {
 	.get_input_buffer_queue = get_input_buffer_queue,
 	.get_dyn_config = get_dyn_config,
 	.set_dyn_config = set_dyn_config,
+	.request_idr = request_idr,
 };

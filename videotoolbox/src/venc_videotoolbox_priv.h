@@ -28,6 +28,7 @@
 #define _VENC_MEDIACODEC_PRIV_H_
 
 #include <VideoToolbox/VideoToolbox.h>
+#include <dlfcn.h>
 #include <futils/futils.h>
 #include <libpomp.h>
 #include <media-buffers/mbuf_coded_video_frame.h>
@@ -61,12 +62,6 @@ struct venc_videotoolbox_message {
 };
 
 
-struct frame_data {
-	struct mbuf_raw_video_frame *frame;
-	const void *data;
-};
-
-
 struct venc_videotoolbox {
 	struct venc_encoder *base;
 	struct mbuf_raw_video_frame_queue *in_queue;
@@ -74,6 +69,7 @@ struct venc_videotoolbox {
 	struct pomp_evt *out_queue_evt;
 	VTCompressionSessionRef compress_ref;
 	pthread_t thread;
+	OSType vt_pixel_format;
 
 	bool thread_launched;
 	bool ps_lock_created;
@@ -83,12 +79,17 @@ struct venc_videotoolbox {
 	atomic_bool flushing;
 	atomic_bool flush_discard;
 	atomic_bool ps_stored;
+	atomic_bool idr_requested;
 	pthread_mutex_t ps_lock;
 
 	struct venc_dyn_config dynconf;
 	unsigned int input_frame_cnt;
 	struct mbox *mbox;
 };
+
+
+/* Type conversion functions between videotoolbox & venc types */
+#include "venc_videotoolbox_convert.h"
 
 
 #endif /* !_VENC_MEDIACODEC_PRIV_H_ */

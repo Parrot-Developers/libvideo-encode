@@ -30,6 +30,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -84,6 +85,10 @@
 
 #ifdef BUILD_LIBVIDEO_ENCODE_TURBOJPEG
 #	include <video-encode/venc_turbojpeg.h>
+#endif
+
+#ifdef BUILD_LIBVIDEO_ENCODE_PNG
+#	include <video-encode/venc_png.h>
 #endif
 
 static inline void xfree(void **ptr)

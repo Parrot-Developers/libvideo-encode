@@ -30,6 +30,81 @@
 #include "venc_core_priv.h"
 
 
+#define VENC_H264_PS_MAX_LEN 100
+
+
+uint32_t venc_h264_get_nalu_importance(enum h264_nalu_type type,
+				       uint8_t nri,
+				       enum vdef_coded_frame_type frame_type,
+				       uint8_t layer)
+{
+	/**
+	 * NAL unit importance is set to:
+	 * 0 for SPS, PPS, IDR or IR pattern
+	 * 1 for layer 0 (base_frame)
+	 * 2 for layer 1 (ref_frame)
+	 * 3 for layer 2 (P_NON_REF)
+	 * UINT32_MAX for FILLER and UNKNOWN NAL units
+	 * Note: for SEI NALUs, importance depends on the frame type and layer
+	 */
+	switch (type) {
+	case H264_NALU_TYPE_SPS:
+	case H264_NALU_TYPE_PPS:
+	case H264_NALU_TYPE_END_OF_SEQ:
+	case H264_NALU_TYPE_END_OF_STREAM:
+	case H264_NALU_TYPE_SLICE_IDR:
+		return 0;
+	case H264_NALU_TYPE_SLICE:
+		switch (frame_type) {
+		case VDEF_CODED_FRAME_TYPE_IDR:
+		case VDEF_CODED_FRAME_TYPE_I:
+			return 0;
+		case VDEF_CODED_FRAME_TYPE_P_IR_START:
+		case VDEF_CODED_FRAME_TYPE_P:
+			switch (nri) {
+			case 3:
+				/* IR pattern */
+				return 0;
+			case 2:
+				/* Base layer, non IR pattern */
+				return 1;
+			case 1:
+			default:
+				/* Layer 1 or unknown (reference picture) */
+				return 2;
+			}
+		case VDEF_CODED_FRAME_TYPE_P_NON_REF:
+			return 3;
+		default:
+			return UINT32_MAX;
+		}
+	case H264_NALU_TYPE_SEI:
+		switch (frame_type) {
+		case VDEF_CODED_FRAME_TYPE_IDR:
+		case VDEF_CODED_FRAME_TYPE_P_IR_START:
+			return 0;
+		case VDEF_CODED_FRAME_TYPE_P:
+			switch (layer) {
+			case 0:
+				return 0;
+			case 1:
+				return 2;
+			default:
+				return 1;
+			}
+		case VDEF_CODED_FRAME_TYPE_P_NON_REF:
+			return 3;
+		default:
+			return 1;
+		}
+	case H264_NALU_TYPE_AUD:
+	case H264_NALU_TYPE_FILLER:
+	default:
+		return UINT32_MAX;
+	}
+}
+
+
 int venc_h264_writer_new(const uint8_t *sps,
 			 size_t sps_size,
 			 const uint8_t *pps,
@@ -50,11 +125,13 @@ int venc_h264_writer_new(const uint8_t *sps,
 	_sps = calloc(1, sizeof(*_sps));
 	if (_sps == NULL) {
 		res = -ENOMEM;
+		ULOG_ERRNO("calloc", -res);
 		goto error;
 	}
 	_pps = calloc(1, sizeof(*_pps));
 	if (_pps == NULL) {
 		res = -ENOMEM;
+		ULOG_ERRNO("calloc", -res);
 		goto error;
 	}
 
@@ -115,6 +192,156 @@ int venc_h264_writer_destroy(struct h264_ctx *h264)
 	}
 
 	return 0;
+}
+
+
+static int set_h264_vui(struct venc_encoder *self, struct h264_sps *sps)
+{
+	const struct vdef_format_info *info = &self->config.input.info;
+
+	sps->vui_parameters_present_flag = 1;
+
+	/* Aspect ratio */
+	if ((info->sar.width != 0) && (info->sar.height != 0)) {
+		sps->vui.aspect_ratio_info_present_flag = 1;
+		sps->vui.aspect_ratio_idc = h264_sar_to_aspect_ratio_idc(
+			info->sar.width, info->sar.height);
+		if (sps->vui.aspect_ratio_idc == 255) {
+			/* Extended_SAR */
+			sps->vui.sar_width = info->sar.width;
+			sps->vui.sar_height = info->sar.height;
+		}
+	}
+
+	/* Video signal */
+	sps->vui.video_signal_type_present_flag = 1;
+	sps->vui.video_format = 5; /* Unspecified */
+	sps->vui.video_full_range_flag = !!info->full_range;
+	sps->vui.colour_description_present_flag = 1;
+	sps->vui.colour_primaries =
+		vdef_color_primaries_to_h264(info->color_primaries);
+	sps->vui.transfer_characteristics =
+		vdef_transfer_function_to_h264(info->transfer_function);
+	sps->vui.matrix_coefficients =
+		vdef_matrix_coefs_to_h264(info->matrix_coefs);
+	sps->vui.chroma_loc_info_present_flag = 0;
+
+	/* Timing */
+	if (!vdef_frac_is_null(&info->framerate)) {
+		sps->vui.pic_struct_present_flag =
+			!!self->config.h264.insert_pic_timing_sei;
+		sps->vui.timing_info_present_flag = 1;
+		sps->vui.fixed_frame_rate_flag = 1;
+		sps->vui.num_units_in_tick = info->framerate.den;
+		sps->vui.time_scale = info->framerate.num * 2;
+		/* A clock precision of 1000 times the num units in tick
+		 * is required, so that capture timestamps can be
+		 * serialized with enough precision */
+		if (info->framerate.den < 1000) {
+			sps->vui.num_units_in_tick *= 1000;
+			sps->vui.time_scale *= 1000;
+		}
+	} else if (self->config.h264.insert_pic_timing_sei) {
+		ULOGW("%s: cannot insert pic timing sei: framerate is null",
+		      __func__);
+	}
+
+	return 0;
+}
+
+
+int venc_h264_patch_ps(struct venc_encoder *self)
+{
+	int res;
+	const struct h264_sps *_sps = NULL;
+	struct h264_sps *sps = NULL;
+	uint8_t *new_sps = NULL;
+	uint8_t *tmp = NULL;
+
+	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(self->h264.ctx == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(self->h264.sps == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(self->h264.sps_size == 0, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(self->h264.pps == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(self->h264.pps_size == 0, EINVAL);
+
+	sps = calloc(1, sizeof(*sps));
+	if (sps == NULL) {
+		res = -ENOMEM;
+		ULOG_ERRNO("calloc", -res);
+		goto out;
+	}
+
+	_sps = h264_ctx_get_sps(self->h264.ctx);
+	if (_sps == NULL) {
+		res = -EPROTO;
+		ULOG_ERRNO("h264_ctx_get_sps", -res);
+		goto out;
+	}
+	memcpy(sps, _sps, sizeof(*sps));
+
+	res = set_h264_vui(self, sps);
+	if (res < 0) {
+		ULOG_ERRNO("set_h264_vui", -res);
+		goto out;
+	}
+
+	res = h264_ctx_set_sps(self->h264.ctx, sps);
+	if (res < 0) {
+		ULOG_ERRNO("h264_ctx_set_sps", -res);
+		goto out;
+	}
+
+	/* Rewrite the SPS */
+	struct h264_nalu_header nh;
+	struct h264_bitstream bs;
+	res = h264_ctx_clear_nalu(self->h264.ctx);
+	if (res < 0) {
+		ULOG_ERRNO("h264_ctx_clear_nalu", -res);
+		goto out;
+	}
+
+	nh.forbidden_zero_bit = 0;
+	nh.nal_ref_idc = 3;
+	nh.nal_unit_type = H264_NALU_TYPE_SPS;
+	res = h264_ctx_set_nalu_header(self->h264.ctx, &nh);
+	if (res < 0) {
+		ULOG_ERRNO("h264_ctx_set_nalu_header", -res);
+		goto out;
+	}
+
+	new_sps = calloc(1, VENC_H264_PS_MAX_LEN);
+	if (new_sps == NULL) {
+		res = -ENOMEM;
+		ULOG_ERRNO("malloc", -res);
+		goto out;
+	}
+
+	memset(&bs, 0, sizeof(bs));
+	h264_bs_init(&bs, new_sps, VENC_H264_PS_MAX_LEN, 1);
+	res = h264_write_nalu(&bs, self->h264.ctx);
+	if (res < 0) {
+		ULOG_ERRNO("h264_write_nalu", -res);
+		goto out;
+	}
+
+	/* Save PS */
+	tmp = realloc(self->h264.sps, bs.off);
+	if (!tmp) {
+		res = -errno;
+		ULOG_ERRNO("realloc", -res);
+		goto out;
+	}
+	self->h264.sps = tmp;
+	self->h264.sps_size = bs.off;
+	memcpy(self->h264.sps, new_sps, self->h264.sps_size);
+
+	res = 0;
+
+out:
+	free(sps);
+	free(new_sps);
+	return res;
 }
 
 
@@ -219,7 +446,8 @@ int venc_h264_aud_write(struct h264_ctx *h264,
 	nalu.h264.slice_type = H264_SLICE_TYPE_UNKNOWN;
 	nalu.h264.slice_mb_count = 0;
 	nalu.size = size;
-	nalu.importance = 0;
+	nalu.importance = venc_h264_get_nalu_importance(
+		nalu.h264.type, nh.nal_ref_idc, info.type, info.layer);
 
 	res = mbuf_coded_video_frame_add_nalu(frame, mem, 0, &nalu);
 	if (res < 0) {
@@ -247,8 +475,8 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 	uint32_t sz, start_code = htonl(0x00000001);
 	struct vdef_nalu sps_nalu = {0}, pps_nalu = {0};
 	size_t size, len;
-	uint8_t *sps_data, *pps_data;
-	void *void_data;
+	uint8_t *sps_data = NULL, *pps_data = NULL;
+	void *void_data = NULL;
 	struct mbuf_mem *sps_mem = NULL, *pps_mem = NULL;
 	struct vdef_coded_frame info;
 
@@ -281,8 +509,9 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 	size = 0;
 	if (info.format.data_format == VDEF_CODED_DATA_FORMAT_BYTE_STREAM) {
 		if (len <= 4) {
-			ULOG_ERRNO("", ENOBUFS);
-			return -ENOBUFS;
+			res = -ENOBUFS;
+			ULOG_ERRNO("", -res);
+			goto out;
 		}
 		memcpy(sps_data, &start_code, sizeof(uint32_t));
 		size += 4;
@@ -290,8 +519,9 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 		len -= size;
 	} else if (info.format.data_format == VDEF_CODED_DATA_FORMAT_AVCC) {
 		if (len <= 4) {
-			ULOG_ERRNO("", ENOBUFS);
-			return -ENOBUFS;
+			res = -ENOBUFS;
+			ULOG_ERRNO("", -res);
+			goto out;
 		}
 		sz = htonl(sps_size);
 		memcpy(sps_data, &sz, sizeof(uint32_t));
@@ -300,8 +530,9 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 		len -= size;
 	}
 	if (sps_size > len) {
-		ULOG_ERRNO("", ENOBUFS);
-		return -ENOBUFS;
+		res = -ENOBUFS;
+		ULOG_ERRNO("", -res);
+		goto out;
 	}
 	memcpy(sps_data, sps, sps_size);
 	size += sps_size;
@@ -310,6 +541,8 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 	sps_nalu.h264.slice_mb_count = 0;
 	sps_nalu.size = size;
 	sps_nalu.importance = 0;
+	sps_nalu.importance = venc_h264_get_nalu_importance(
+		sps_nalu.h264.type, 3, info.type, info.layer);
 
 	res = mbuf_coded_video_frame_add_nalu(frame, sps_mem, 0, &sps_nalu);
 	if (res < 0) {
@@ -333,8 +566,9 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 	size = 0;
 	if (info.format.data_format == VDEF_CODED_DATA_FORMAT_BYTE_STREAM) {
 		if (len <= 4) {
-			ULOG_ERRNO("", ENOBUFS);
-			return -ENOBUFS;
+			res = -ENOBUFS;
+			ULOG_ERRNO("", -res);
+			goto out;
 		}
 		memcpy(pps_data, &start_code, sizeof(uint32_t));
 		size += 4;
@@ -342,8 +576,9 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 		len -= size;
 	} else if (info.format.data_format == VDEF_CODED_DATA_FORMAT_AVCC) {
 		if (len <= 4) {
-			ULOG_ERRNO("", ENOBUFS);
-			return -ENOBUFS;
+			res = -ENOBUFS;
+			ULOG_ERRNO("", -res);
+			goto out;
 		}
 		sz = htonl(pps_size);
 		memcpy(pps_data, &sz, sizeof(uint32_t));
@@ -352,8 +587,9 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 		len -= size;
 	}
 	if (pps_size > len) {
-		ULOG_ERRNO("", ENOBUFS);
-		return -ENOBUFS;
+		res = -ENOBUFS;
+		ULOG_ERRNO("", -res);
+		goto out;
 	}
 	memcpy(pps_data, pps, pps_size);
 	size += pps_size;
@@ -361,7 +597,8 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 	pps_nalu.h264.slice_type = H264_SLICE_TYPE_UNKNOWN;
 	pps_nalu.h264.slice_mb_count = 0;
 	pps_nalu.size = size;
-	pps_nalu.importance = 0;
+	pps_nalu.importance = venc_h264_get_nalu_importance(
+		pps_nalu.h264.type, 3, info.type, info.layer);
 
 	res = mbuf_coded_video_frame_add_nalu(frame, pps_mem, 0, &pps_nalu);
 	if (res < 0) {
@@ -370,12 +607,16 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 	}
 
 out:
-	err = mbuf_mem_unref(sps_mem);
-	if (err != 0)
-		ULOG_ERRNO("mbuf_mem_unref", -err);
-	err = mbuf_mem_unref(pps_mem);
-	if (err != 0)
-		ULOG_ERRNO("mbuf_mem_unref", -err);
+	if (sps_mem != NULL) {
+		err = mbuf_mem_unref(sps_mem);
+		if (err != 0)
+			ULOG_ERRNO("mbuf_mem_unref", -err);
+	}
+	if (pps_mem != NULL) {
+		err = mbuf_mem_unref(pps_mem);
+		if (err != 0)
+			ULOG_ERRNO("mbuf_mem_unref", -err);
+	}
 	return res;
 }
 
@@ -668,8 +909,9 @@ int venc_h264_sei_write(struct h264_ctx *h264,
 	size = 0;
 	if (info.format.data_format == VDEF_CODED_DATA_FORMAT_BYTE_STREAM) {
 		if (len <= 4) {
-			ULOG_ERRNO("", ENOBUFS);
-			return -ENOBUFS;
+			res = -ENOBUFS;
+			ULOG_ERRNO("", -res);
+			goto out;
 		}
 		data[0] = data[1] = data[2] = 0;
 		data[3] = 1;
@@ -678,8 +920,9 @@ int venc_h264_sei_write(struct h264_ctx *h264,
 		len -= size;
 	} else if (info.format.data_format == VDEF_CODED_DATA_FORMAT_AVCC) {
 		if (len <= 4) {
-			ULOG_ERRNO("", ENOBUFS);
-			return -ENOBUFS;
+			res = -ENOBUFS;
+			ULOG_ERRNO("", -res);
+			goto out;
 		}
 		size += 4;
 		data += size;
@@ -689,7 +932,7 @@ int venc_h264_sei_write(struct h264_ctx *h264,
 	res = h264_write_nalu(&bs, h264);
 	if (res < 0) {
 		ULOG_ERRNO("h264_write_nalu", -res);
-		return res;
+		goto out;
 	}
 
 	if (info.format.data_format == VDEF_CODED_DATA_FORMAT_AVCC) {
@@ -701,7 +944,8 @@ int venc_h264_sei_write(struct h264_ctx *h264,
 	nalu.h264.slice_type = H264_SLICE_TYPE_UNKNOWN;
 	nalu.h264.slice_mb_count = 0;
 	nalu.size = size;
-	nalu.importance = 0;
+	nalu.importance = venc_h264_get_nalu_importance(
+		nalu.h264.type, nh.nal_ref_idc, info.type, info.layer);
 
 	res = mbuf_coded_video_frame_add_nalu(frame, mem, 0, &nalu);
 	if (res < 0) {
@@ -710,9 +954,11 @@ int venc_h264_sei_write(struct h264_ctx *h264,
 	}
 
 out:
-	err = mbuf_mem_unref(mem);
-	if (err != 0)
-		ULOG_ERRNO("mbuf_mem_unref", -err);
+	if (mem != NULL) {
+		err = mbuf_mem_unref(mem);
+		if (err != 0)
+			ULOG_ERRNO("mbuf_mem_unref", -err);
+	}
 
 	return res;
 }

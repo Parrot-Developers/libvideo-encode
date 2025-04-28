@@ -75,7 +75,7 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 		ret = mbox_peek(self->mbox, &message);
 		if (ret < 0) {
 			if (ret != -EAGAIN)
-				ULOG_ERRNO("mbox_peek", -ret);
+				VENC_LOG_ERRNO("mbox_peek", -ret);
 			break;
 		}
 
@@ -84,18 +84,18 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 			err = pomp_loop_idle_add_with_cookie(
 				self->base->loop, call_flush_done, self, self);
 			if (err < 0)
-				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
-					   -err);
+				VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					       -err);
 			break;
 		case VENC_MSG_STOP:
 			err = pomp_loop_idle_add_with_cookie(
 				self->base->loop, call_stop_done, self, self);
 			if (err < 0)
-				ULOG_ERRNO("pomp_loop_idle_add_with_cookie",
-					   -err);
+				VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					       -err);
 			break;
 		default:
-			ULOGE("unknown message: %c", message);
+			VENC_LOGE("unknown message: %c", message);
 			break;
 		}
 	} while (ret == 0);
@@ -114,8 +114,9 @@ static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 		if (err == -EAGAIN) {
 			return;
 		} else if (err < 0) {
-			ULOG_ERRNO("mbuf_coded_video_frame_queue_pop:enc_out",
-				   -err);
+			VENC_LOG_ERRNO(
+				"mbuf_coded_video_frame_queue_pop:enc_out",
+				-err);
 			return;
 		}
 
@@ -123,14 +124,16 @@ static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 		err = mbuf_coded_video_frame_get_frame_info(out_frame,
 							    &out_info);
 		if (err < 0)
-			ULOG_ERRNO("mbuf_coded_video_frame_get_frame_info",
-				   -err);
+			VENC_LOG_ERRNO("mbuf_coded_video_frame_get_frame_info",
+				       -err);
 
-		if (!atomic_load(&self->flush_discard))
+		if (!atomic_load(&self->flush_discard)) {
 			self->base->cbs.frame_output(
 				self->base, 0, out_frame, self->base->userdata);
-		else
-			ULOGD("discarding frame %d", out_info.info.index);
+			self->base->counters.out++;
+		} else {
+			VENC_LOGD("discarding frame %d", out_info.info.index);
+		}
 
 		mbuf_coded_video_frame_unref(out_frame);
 	} while (err == 0);
@@ -146,10 +149,10 @@ static int generate_ps(struct venc_x265 *self)
 
 	ret = self->api->encoder_headers(self->x265, &nalu, &nalu_count);
 	if (ret < 0) {
-		ULOG_ERRNO("x265_encoder_headers", -ret);
+		VENC_LOG_ERRNO("x265_encoder_headers", -ret);
 		return ret;
 	}
-	ULOG_ERRNO_RETURN_ERR_IF(nalu_count < 3, ENODATA);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(nalu_count < 3, ENODATA);
 
 	xfree((void **)&self->base->h265.vps);
 	self->base->h265.vps_size = 0;
@@ -161,10 +164,10 @@ static int generate_ps(struct venc_x265 *self)
 	for (i = 0; i < nalu_count; i++) {
 		if ((nalu[i].type == NAL_UNIT_VPS) && (!self->base->h265.vps)) {
 			len = nalu[i].sizeBytes;
-			ULOG_ERRNO_RETURN_ERR_IF(len <= 4, ENODATA);
+			VENC_LOG_ERRNO_RETURN_ERR_IF(len <= 4, ENODATA);
 			self->base->h265.vps = malloc(len - 4);
-			ULOG_ERRNO_RETURN_ERR_IF(self->base->h265.vps == NULL,
-						 ENOMEM);
+			VENC_LOG_ERRNO_RETURN_ERR_IF(
+				self->base->h265.vps == NULL, ENOMEM);
 			memcpy(self->base->h265.vps,
 			       nalu[i].payload + 4,
 			       len - 4);
@@ -172,10 +175,10 @@ static int generate_ps(struct venc_x265 *self)
 		} else if ((nalu[i].type == NAL_UNIT_SPS) &&
 			   (!self->base->h265.sps)) {
 			len = nalu[i].sizeBytes;
-			ULOG_ERRNO_RETURN_ERR_IF(len <= 4, ENODATA);
+			VENC_LOG_ERRNO_RETURN_ERR_IF(len <= 4, ENODATA);
 			self->base->h265.sps = malloc(len - 4);
-			ULOG_ERRNO_RETURN_ERR_IF(self->base->h265.sps == NULL,
-						 ENOMEM);
+			VENC_LOG_ERRNO_RETURN_ERR_IF(
+				self->base->h265.sps == NULL, ENOMEM);
 			memcpy(self->base->h265.sps,
 			       nalu[i].payload + 4,
 			       len - 4);
@@ -183,10 +186,10 @@ static int generate_ps(struct venc_x265 *self)
 		} else if ((nalu[i].type == NAL_UNIT_PPS) &&
 			   (!self->base->h265.pps)) {
 			len = nalu[i].sizeBytes;
-			ULOG_ERRNO_RETURN_ERR_IF(len <= 4, ENODATA);
+			VENC_LOG_ERRNO_RETURN_ERR_IF(len <= 4, ENODATA);
 			self->base->h265.pps = malloc(len - 4);
-			ULOG_ERRNO_RETURN_ERR_IF(self->base->h265.pps == NULL,
-						 ENOMEM);
+			VENC_LOG_ERRNO_RETURN_ERR_IF(
+				self->base->h265.pps == NULL, ENOMEM);
 			memcpy(self->base->h265.pps,
 			       nalu[i].payload + 4,
 			       len - 4);
@@ -194,19 +197,19 @@ static int generate_ps(struct venc_x265 *self)
 		}
 	}
 
-	ULOG_ERRNO_RETURN_ERR_IF(self->base->h265.vps == NULL, ENODATA);
-	ULOG_ERRNO_RETURN_ERR_IF(self->base->h265.vps_size == 0, ENODATA);
-	ULOG_ERRNO_RETURN_ERR_IF(self->base->h265.sps == NULL, ENODATA);
-	ULOG_ERRNO_RETURN_ERR_IF(self->base->h265.sps_size == 0, ENODATA);
-	ULOG_ERRNO_RETURN_ERR_IF(self->base->h265.pps == NULL, ENODATA);
-	ULOG_ERRNO_RETURN_ERR_IF(self->base->h265.pps_size == 0, ENODATA);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(self->base->h265.vps == NULL, ENODATA);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(self->base->h265.vps_size == 0, ENODATA);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(self->base->h265.sps == NULL, ENODATA);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(self->base->h265.sps_size == 0, ENODATA);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(self->base->h265.pps == NULL, ENODATA);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(self->base->h265.pps_size == 0, ENODATA);
 
 	ret = h265_reader_parse_nalu(self->h265_reader,
 				     0,
 				     self->base->h265.vps,
 				     self->base->h265.vps_size);
 	if (ret < 0) {
-		ULOG_ERRNO("h265_reader_parse", -ret);
+		VENC_LOG_ERRNO("h265_reader_parse", -ret);
 		return ret;
 	}
 
@@ -215,7 +218,7 @@ static int generate_ps(struct venc_x265 *self)
 				     self->base->h265.sps,
 				     self->base->h265.sps_size);
 	if (ret < 0) {
-		ULOG_ERRNO("h265_reader_parse", -ret);
+		VENC_LOG_ERRNO("h265_reader_parse", -ret);
 		return ret;
 	}
 
@@ -224,7 +227,7 @@ static int generate_ps(struct venc_x265 *self)
 				     self->base->h265.pps,
 				     self->base->h265.pps_size);
 	if (ret < 0) {
-		ULOG_ERRNO("h265_reader_parse", -ret);
+		VENC_LOG_ERRNO("h265_reader_parse", -ret);
 		return ret;
 	}
 
@@ -245,7 +248,8 @@ static enum vdef_coded_frame_type x265_to_vdef_frame_type(int frame_type)
 }
 
 
-static int add_x265_nalus(struct mbuf_coded_video_frame *out_frame,
+static int add_x265_nalus(struct venc_x265 *self,
+			  struct mbuf_coded_video_frame *out_frame,
 			  struct vdef_coded_frame *out_info,
 			  x265_nal *nalu,
 			  size_t nalu_count)
@@ -266,12 +270,12 @@ static int add_x265_nalus(struct mbuf_coded_video_frame *out_frame,
 
 	res = mbuf_mem_generic_new(mem_size, &nalus_mem);
 	if (res < 0) {
-		ULOG_ERRNO("mbuf_mem_generic_new", -res);
+		VENC_LOG_ERRNO("mbuf_mem_generic_new", -res);
 		return res;
 	}
 	res = mbuf_mem_get_data(nalus_mem, &nalu_data, &mem_size);
 	if (res < 0) {
-		ULOG_ERRNO("mbuf_mem_get_data", -res);
+		VENC_LOG_ERRNO("mbuf_mem_get_data", -res);
 		goto out;
 	}
 	data = nalu_data;
@@ -292,7 +296,7 @@ static int add_x265_nalus(struct mbuf_coded_video_frame *out_frame,
 		if (out_info->format.data_format ==
 		    VDEF_CODED_DATA_FORMAT_BYTE_STREAM) {
 			if (mem_size < 4) {
-				ULOG_ERRNO("", ENOBUFS);
+				VENC_LOG_ERRNO("", ENOBUFS);
 				res = -ENOBUFS;
 				goto out;
 			}
@@ -304,7 +308,7 @@ static int add_x265_nalus(struct mbuf_coded_video_frame *out_frame,
 		} else if (out_info->format.data_format ==
 			   VDEF_CODED_DATA_FORMAT_AVCC) {
 			if (mem_size < 4) {
-				ULOG_ERRNO("", ENOBUFS);
+				VENC_LOG_ERRNO("", ENOBUFS);
 				res = -ENOBUFS;
 			}
 			uint32_t nalu_size = htonl(nalu_len);
@@ -314,7 +318,7 @@ static int add_x265_nalus(struct mbuf_coded_video_frame *out_frame,
 			mem_size -= 4;
 		}
 		if (nalu_len > mem_size) {
-			ULOG_ERRNO("", ENOBUFS);
+			VENC_LOG_ERRNO("", ENOBUFS);
 			res = -ENOBUFS;
 			goto out;
 		}
@@ -324,7 +328,7 @@ static int add_x265_nalus(struct mbuf_coded_video_frame *out_frame,
 		res = mbuf_coded_video_frame_add_nalu(
 			out_frame, nalus_mem, base_offset, &out_nalu);
 		if (res < 0) {
-			ULOG_ERRNO("mbuf_coded_video_frame_add_nalu", -res);
+			VENC_LOG_ERRNO("mbuf_coded_video_frame_add_nalu", -res);
 			goto out;
 		}
 		offset += nalu_len;
@@ -332,7 +336,7 @@ static int add_x265_nalus(struct mbuf_coded_video_frame *out_frame,
 out:
 	err = mbuf_mem_unref(nalus_mem);
 	if (err != 0)
-		ULOG_ERRNO("mbuf_mem_unref", -err);
+		VENC_LOG_ERRNO("mbuf_mem_unref", -err);
 
 	return res;
 }
@@ -359,7 +363,8 @@ static int fill_frame(struct venc_x265 *self,
 		mbuf_coded_video_frame_ancillary_data_copier,
 		out_frame);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_foreach_ancillary_data", -ret);
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_foreach_ancillary_data",
+			       -ret);
 		goto out;
 	}
 
@@ -368,23 +373,24 @@ static int fill_frame(struct venc_x265 *self,
 	if (ret == 0) {
 		ret = mbuf_coded_video_frame_set_metadata(out_frame, metadata);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_coded_video_frame_set_metadata", -ret);
+			VENC_LOG_ERRNO("mbuf_coded_video_frame_set_metadata",
+				       -ret);
 			goto out;
 		}
 	} else if ((ret < 0) && (ret != -ENOENT)) {
-		ULOG_ERRNO("mbuf_raw_video_frame_get_metadata", -ret);
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_metadata", -ret);
 		goto out;
 	}
 
 	/* Add generated NAL units */
 	ret = venc_h265_generate_nalus(self->base, out_frame, out_info);
 	if (ret < 0) {
-		ULOG_ERRNO("venc_h265_generate_nalus", -ret);
+		VENC_LOG_ERRNO("venc_h265_generate_nalus", -ret);
 		goto out;
 	}
 
 	/* Add x265 NAL units */
-	ret = add_x265_nalus(out_frame, out_info, nalu, nalu_count);
+	ret = add_x265_nalus(self, out_frame, out_info, nalu, nalu_count);
 
 out:
 	if (metadata)
@@ -396,19 +402,19 @@ out:
 static int encode_frame(struct venc_x265 *self,
 			struct mbuf_raw_video_frame *in_frame)
 {
-	int ret;
+	int ret, err;
 	uint32_t nalu_count = 0;
-	int frame_size;
+	int frame_size = 0;
 	x265_nal *nalu = NULL;
-	x265_picture out_picture;
+	x265_picture *out_picture = NULL;
 	struct vdef_raw_frame info;
 	const void *plane_data;
 	const uint8_t *in_data;
 	size_t len, nalu_len = 0, nalu_offset = 4;
 	ssize_t i;
-	struct mbuf_raw_video_frame *enc_frame;
+	struct mbuf_raw_video_frame *enc_frame = NULL;
 	struct mbuf_coded_video_frame *out_frame = NULL;
-	struct vdef_coded_frame out_info;
+	struct vdef_coded_frame out_info = {};
 	struct vdef_raw_frame in_info;
 	struct timespec cur_ts = {0, 0};
 	uint64_t ts_us;
@@ -422,7 +428,8 @@ static int encode_frame(struct venc_x265 *self,
 	if (in_frame != NULL) {
 		ret = mbuf_raw_video_frame_get_frame_info(in_frame, &info);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_get_frame_info", -ret);
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_get_frame_info",
+				       -ret);
 			return ret;
 		}
 
@@ -442,7 +449,7 @@ static int encode_frame(struct venc_x265 *self,
 					       supported_formats,
 					       NB_SUPPORTED_FORMATS)) {
 			ret = -ENOSYS;
-			ULOG_ERRNO(
+			VENC_LOG_ERRNO(
 				"unsupported format:"
 				" " VDEF_RAW_FORMAT_TO_STR_FMT,
 				-ret,
@@ -481,21 +488,24 @@ static int encode_frame(struct venc_x265 *self,
 			if (ret < 0) {
 				/* TODO: don't forget to drop the frame
 				 * otherwise it remains in the queue. */
-				ULOG_ERRNO("mbuf_raw_video_frame_get_plane(%u)",
-					   -ret,
-					   i);
+				VENC_LOG_ERRNO(
+					"mbuf_raw_video_frame_get_plane(%u)",
+					-ret,
+					i);
 				return ret;
 			}
 		}
 
-		ret = mbuf_raw_video_frame_add_ancillary_buffer(
+		err = mbuf_raw_video_frame_add_ancillary_buffer(
 			in_frame,
 			VENC_ANCILLARY_KEY_DEQUEUE_TIME,
 			&ts_us,
 			sizeof(ts_us));
-		if (ret < 0)
-			ULOG_ERRNO("mbuf_raw_video_frame_add_ancillary_buffer",
-				   -ret);
+		if (err < 0) {
+			VENC_LOGW_ERRNO(
+				"mbuf_raw_video_frame_add_ancillary_buffer",
+				-err);
+		}
 
 		self->in_picture.pts = self->x265_pts;
 		self->in_picture.userData = in_frame;
@@ -509,15 +519,25 @@ static int encode_frame(struct venc_x265 *self,
 		self->x265_pts++;
 	}
 
-	memset(&out_picture, 0, sizeof(out_picture));
+	out_picture = calloc(1, sizeof(*out_picture));
+	if (out_picture == NULL) {
+		ret = -ENOMEM;
+		VENC_LOG_ERRNO("calloc", -ret);
+		return ret;
+	}
+
+	if (in_frame != NULL)
+		self->base->counters.pushed++;
+	else
+		atomic_store(&self->flush_sent, true);
 	ret = self->api->encoder_encode(self->x265,
 					&nalu,
 					&nalu_count,
 					in_frame ? &self->in_picture : NULL,
-					&out_picture);
+					out_picture);
 	if (ret < 0) {
-		ULOG_ERRNO("x265_encoder_encode", -ret);
-		return ret;
+		VENC_LOG_ERRNO("x265_encoder_encode", -ret);
+		goto out;
 	}
 	frame_size = ret;
 
@@ -526,15 +546,19 @@ static int encode_frame(struct venc_x265 *self,
 		ret = mbuf_raw_video_frame_queue_push(self->enc_in_queue,
 						      in_frame);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_push:enc_in",
-				   -ret);
-			return ret;
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_push:enc_in",
+				       -ret);
+			goto out;
 		}
 	}
 
 	/* Return if no frame was output */
-	if (out_picture.userData == NULL)
-		return 0;
+	if (out_picture->userData == NULL) {
+		ret = 0;
+		goto out;
+	}
+
+	self->base->counters.pulled++;
 
 	/* Find the frame (non-blocking);
 	 * drop frames until the frame corresponding to the
@@ -548,23 +572,25 @@ static int encode_frame(struct venc_x265 *self,
 		ret = mbuf_raw_video_frame_queue_pop(self->enc_in_queue,
 						     &enc_frame);
 		if (ret == -EAGAIN) {
-			return 0;
+			ret = 0;
+			goto out;
 		} else if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_pop:enc_in",
-				   -ret);
-			return ret;
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_pop:enc_in",
+				       -ret);
+			goto out;
 		}
-	} while (enc_frame != out_picture.userData);
+	} while (enc_frame != out_picture->userData);
 
 	ret = mbuf_raw_video_frame_get_frame_info(enc_frame, &in_info);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_get_frame_info", -ret);
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_frame_info", -ret);
 		goto out;
 	}
 
 	out_info.info = in_info.info;
 	out_info.format = self->output_format;
-	out_info.type = x265_to_vdef_frame_type(out_picture.sliceType);
+	out_info.type = x265_to_vdef_frame_type(out_picture->sliceType);
+	out_info.layer = 0;
 
 	if (frame_size == 0)
 		out_info.type = VDEF_CODED_FRAME_TYPE_NOT_CODED;
@@ -582,25 +608,25 @@ static int encode_frame(struct venc_x265 *self,
 					     nalu[i].payload + nalu_offset,
 					     nalu_len);
 		if (ret < 0) {
-			ULOG_ERRNO("h265_reader_parse_nalu", -ret);
+			VENC_LOG_ERRNO("h265_reader_parse_nalu", -ret);
 			goto out;
 		}
 	}
 
 	ret = mbuf_coded_video_frame_new(&out_info, &out_frame);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_new", -ret);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_new", -ret);
 		goto out;
 	}
 	ret = mbuf_coded_video_frame_set_callbacks(out_frame, &frame_cbs);
 	if (ret < 0)
-		ULOG_ERRNO("mbuf_coded_video_frame_set_callbacks", -ret);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_set_callbacks", -ret);
 
 	ret = fill_frame(self,
 			 enc_frame,
 			 out_frame,
 			 &out_info,
-			 &out_picture,
+			 out_picture,
 			 nalu,
 			 nalu_count,
 			 frame_size);
@@ -610,23 +636,25 @@ static int encode_frame(struct venc_x265 *self,
 	time_get_monotonic(&cur_ts);
 	time_timespec_to_us(&cur_ts, &ts_us);
 
-	ret = mbuf_coded_video_frame_add_ancillary_buffer(
+	err = mbuf_coded_video_frame_add_ancillary_buffer(
 		out_frame,
 		VENC_ANCILLARY_KEY_OUTPUT_TIME,
 		&ts_us,
 		sizeof(ts_us));
-	if (ret < 0)
-		ULOG_ERRNO("mbuf_coded_video_frame_add_ancillary_buffer", -ret);
+	if (err < 0) {
+		VENC_LOGW_ERRNO("mbuf_coded_video_frame_add_ancillary_buffer",
+				-err);
+	}
 
 	/* Output the frame */
 	ret = mbuf_coded_video_frame_finalize(out_frame);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_finalize", -ret);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_finalize", -ret);
 		goto out;
 	}
 	ret = mbuf_coded_video_frame_queue_push(self->enc_out_queue, out_frame);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_queue_push", -ret);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_queue_push", -ret);
 		goto out;
 	}
 
@@ -635,6 +663,7 @@ out:
 		mbuf_raw_video_frame_unref(enc_frame);
 	if (out_frame)
 		mbuf_coded_video_frame_unref(out_frame);
+	free(out_picture);
 
 	return (ret >= 0) ? frame_size : ret;
 }
@@ -645,42 +674,46 @@ static int complete_flush(struct venc_x265 *self)
 	int ret;
 
 	if (atomic_load(&self->flush_discard)) {
+		do {
+			/* To flush the encoder and retrieve delayed output
+			 * pictures, pass pic_in as NULL */
+			ret = encode_frame(self, NULL);
+		} while (ret > 0);
 
-		while ((ret = encode_frame(self, NULL)) == 0) {
-			if (ret < 0)
-				return ret;
-		}
 		/* Flush the input queue */
 		ret = mbuf_raw_video_frame_queue_flush(self->in_queue);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_flush:input",
-				   -ret);
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_flush:input",
+				       -ret);
 			return ret;
 		}
 		/* Flush the encoder input queue */
 		ret = mbuf_raw_video_frame_queue_flush(self->enc_in_queue);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_flush:enc_in",
-				   -ret);
+			VENC_LOG_ERRNO(
+				"mbuf_raw_video_frame_queue_flush:enc_in",
+				-ret);
 			return ret;
 		}
 		/* Flush the encoder output queue */
 		ret = mbuf_coded_video_frame_queue_flush(self->enc_out_queue);
 		if (ret < 0) {
-			ULOG_ERRNO("mbuf_coded_video_frame_queue_flush:enc_out",
-				   -ret);
+			VENC_LOG_ERRNO(
+				"mbuf_coded_video_frame_queue_flush:enc_out",
+				-ret);
 			return ret;
 		}
 	}
 
 	atomic_store(&self->flushing, false);
 	atomic_store(&self->flush_discard, false);
+	atomic_store(&self->flush_sent, false);
 
 	/* Call the flush callback on the loop */
 	char message = VENC_MSG_FLUSH;
 	ret = mbox_push(self->mbox, &message);
 	if (ret < 0)
-		ULOG_ERRNO("mbox_push", -ret);
+		VENC_LOG_ERRNO("mbox_push", -ret);
 
 	return ret;
 }
@@ -699,7 +732,7 @@ static void check_input_queue(struct venc_x265 *self)
 		ret = encode_frame(self, in_frame);
 		if (ret < 0) {
 			if (ret != -EAGAIN)
-				ULOG_ERRNO("encode_frame", -ret);
+				VENC_LOG_ERRNO("encode_frame", -ret);
 			err = -ENOSPC;
 		} else {
 			frame_size = ret;
@@ -710,8 +743,8 @@ static void check_input_queue(struct venc_x265 *self)
 			ret = mbuf_raw_video_frame_queue_pop(self->in_queue,
 							     &in_frame);
 			if (ret < 0) {
-				ULOG_ERRNO("mbuf_raw_video_frame_queue_pop",
-					   -ret);
+				VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_pop",
+					       -ret);
 				break;
 			}
 			mbuf_raw_video_frame_unref(in_frame);
@@ -722,40 +755,42 @@ static void check_input_queue(struct venc_x265 *self)
 		ret = mbuf_raw_video_frame_queue_peek(self->in_queue,
 						      &in_frame);
 		if (ret < 0 && ret != -EAGAIN && ret != -ENOSPC)
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_peek", -ret);
-		if (self->flushing && ret == -EAGAIN) {
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_peek", -ret);
+		if (atomic_load(&self->flushing) && ret == -EAGAIN) {
 			in_frame = NULL;
-			if ((atomic_load(&self->flushing)) &&
-			    (!atomic_load(&self->flush_discard))) {
-				if (frame_size == 0) {
+			if (!atomic_load(&self->flush_discard)) {
+				if (frame_size == 0 &&
+				    atomic_load(&self->flush_sent)) {
 					ret = complete_flush(self);
 					if (ret < 0)
-						ULOG_ERRNO("complete_flush",
-							   -ret);
+						VENC_LOG_ERRNO("complete_flush",
+							       -ret);
 					continue;
 				}
 				/* Else we proceed to call encode_frame()
 				 * without an input frame to flush the
 				 * encoder */
-				while ((ret = encode_frame(self, NULL)) == 0) {
-					if (ret < 0)
-						break;
-					frame_size = ret;
-				}
 			}
 		}
 	}
 
-	if (self->flushing && ret == -EAGAIN) {
-		if (((atomic_load(&self->flushing)) &&
-		     (!atomic_load(&self->flush_discard)))) {
-			/* Call encode_frame() without an input frame to
-			 * check whether the encoder is flushed */
-			frame_size = encode_frame(self, NULL);
-			if (frame_size == 0) {
+	if ((ret == -EAGAIN) && (atomic_load(&self->flushing)) &&
+	    (!atomic_load(&self->flush_discard))) {
+		/* Else we proceed to call encode_frame()
+		 * without an input frame to flush the
+		 * encoder */
+		while (true) {
+			ret = encode_frame(self, NULL);
+			if (ret < 0) {
+				if (ret != -EAGAIN)
+					VENC_LOG_ERRNO("encode_frame", -ret);
+				break;
+			}
+			if (ret == 0 && atomic_load(&self->flush_sent)) {
 				ret = complete_flush(self);
 				if (ret < 0)
-					ULOG_ERRNO("complete_flush", -ret);
+					VENC_LOG_ERRNO("complete_flush", -ret);
+				break;
 			}
 		}
 	}
@@ -777,20 +812,24 @@ static void *encoder_thread(void *ptr)
 	struct pomp_evt *in_queue_evt = NULL;
 	char message;
 
+	ret = pthread_setname_np(pthread_self(), "venc_x265");
+	if (ret != 0)
+		VENC_LOG_ERRNO("pthread_setname_np", ret);
+
 	loop = pomp_loop_new();
 	if (!loop) {
-		ULOG_ERRNO("pomp_loop_new", ENOMEM);
+		VENC_LOG_ERRNO("pomp_loop_new", ENOMEM);
 		goto exit;
 	}
 	ret = mbuf_raw_video_frame_queue_get_event(self->in_queue,
 						   &in_queue_evt);
 	if (ret != 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_queue_get_event", -ret);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_queue_get_event", -ret);
 		goto exit;
 	}
 	ret = pomp_evt_attach_to_loop(in_queue_evt, loop, input_event_cb, self);
 	if (ret != 0) {
-		ULOG_ERRNO("pomp_evt_attach_to_loop", -ret);
+		VENC_LOG_ERRNO("pomp_evt_attach_to_loop", -ret);
 		goto exit;
 	}
 
@@ -801,7 +840,7 @@ static void *encoder_thread(void *ptr)
 		    (atomic_load(&self->flush_discard))) {
 			ret = complete_flush(self);
 			if (ret < 0)
-				ULOG_ERRNO("complete_flush", -ret);
+				VENC_LOG_ERRNO("complete_flush", -ret);
 			continue;
 		}
 
@@ -812,7 +851,7 @@ static void *encoder_thread(void *ptr)
 				  : 5;
 		ret = pomp_loop_wait_and_process(loop, timeout);
 		if (ret < 0 && ret != -ETIMEDOUT) {
-			ULOG_ERRNO("pomp_loop_wait_and_process", -ret);
+			VENC_LOG_ERRNO("pomp_loop_wait_and_process", -ret);
 			if (!self->should_stop) {
 				/* Avoid looping on errors */
 				usleep(5000);
@@ -827,18 +866,18 @@ static void *encoder_thread(void *ptr)
 	message = VENC_MSG_STOP;
 	ret = mbox_push(self->mbox, &message);
 	if (ret < 0)
-		ULOG_ERRNO("mbox_push", -ret);
+		VENC_LOG_ERRNO("mbox_push", -ret);
 
 exit:
 	if (in_queue_evt != NULL) {
 		ret = pomp_evt_detach_from_loop(in_queue_evt, loop);
 		if (ret != 0)
-			ULOG_ERRNO("pomp_evt_detach_from_loop", -ret);
+			VENC_LOG_ERRNO("pomp_evt_detach_from_loop", -ret);
 	}
 	if (loop != NULL) {
 		ret = pomp_loop_destroy(loop);
 		if (ret != 0)
-			ULOG_ERRNO("pomp_loop_destroy", -ret);
+			VENC_LOG_ERRNO("pomp_loop_destroy", -ret);
 	}
 
 	return NULL;
@@ -861,6 +900,46 @@ static int get_supported_input_formats(const struct vdef_raw_format **formats)
 	*formats = supported_formats;
 	return NB_SUPPORTED_FORMATS;
 }
+
+
+static int copy_implem_cfg(const struct venc_config_impl *impl_cfg,
+			   struct venc_config_impl **ret_obj)
+{
+	struct venc_config_x265 *specific = (struct venc_config_x265 *)impl_cfg;
+	struct venc_config_x265 *copy = NULL;
+	ULOG_ERRNO_RETURN_ERR_IF(specific == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(ret_obj == NULL, EINVAL);
+
+	*ret_obj = NULL;
+
+	copy = calloc(1, sizeof(*copy));
+	ULOG_ERRNO_RETURN_ERR_IF(copy == NULL, ENOMEM);
+
+	/* Deep copy */
+	*copy = *specific;
+	if (copy->preset)
+		copy->preset = strdup(specific->preset);
+	if (copy->tune)
+		copy->tune = strdup(specific->tune);
+
+	*ret_obj = (struct venc_config_impl *)copy;
+
+	return 0;
+}
+
+
+static int free_implem_cfg(struct venc_config_impl *impl_cfg)
+{
+	struct venc_config_x265 *specific = (struct venc_config_x265 *)impl_cfg;
+	ULOG_ERRNO_RETURN_ERR_IF(specific == NULL, EINVAL);
+
+	free((void *)specific->preset);
+	free((void *)specific->tune);
+	free((void *)specific);
+
+	return 0;
+}
+
 
 static int flush(struct venc_encoder *base, int discard_)
 {
@@ -898,7 +977,7 @@ static int destroy(struct venc_encoder *base)
 	int err;
 	struct venc_x265 *self;
 
-	ULOG_ERRNO_RETURN_ERR_IF(base->derived == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 
 	self = base->derived;
 	if (self == NULL)
@@ -907,37 +986,39 @@ static int destroy(struct venc_encoder *base)
 	/* Stop and join the encoding thread */
 	err = stop(base);
 	if (err < 0)
-		ULOG_ERRNO("stop", -err);
+		VENC_LOG_ERRNO("stop", -err);
 	if (self->thread_launched) {
 		err = pthread_join(self->thread, NULL);
 		if (err != 0)
-			ULOG_ERRNO("pthread_join", err);
+			VENC_LOG_ERRNO("pthread_join", err);
 	}
 
 	/* Free the resources */
 	if (self->in_queue != NULL) {
 		err = mbuf_raw_video_frame_queue_destroy(self->in_queue);
 		if (err < 0)
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_destroy:input",
-				   -err);
+			VENC_LOG_ERRNO(
+				"mbuf_raw_video_frame_queue_destroy:input",
+				-err);
 	}
 	if (self->enc_in_queue != NULL) {
 		err = mbuf_raw_video_frame_queue_destroy(self->enc_in_queue);
 		if (err < 0)
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_destroy:enc_in",
-				   -err);
+			VENC_LOG_ERRNO(
+				"mbuf_raw_video_frame_queue_destroy:enc_in",
+				-err);
 	}
 	if (self->enc_out_queue_evt != NULL &&
 	    pomp_evt_is_attached(self->enc_out_queue_evt, base->loop)) {
 		err = pomp_evt_detach_from_loop(self->enc_out_queue_evt,
 						base->loop);
 		if (err < 0)
-			ULOG_ERRNO("pomp_evt_detach_from_loop", -err);
+			VENC_LOG_ERRNO("pomp_evt_detach_from_loop", -err);
 	}
 	if (self->enc_out_queue != NULL) {
 		err = mbuf_coded_video_frame_queue_destroy(self->enc_out_queue);
 		if (err < 0)
-			ULOG_ERRNO(
+			VENC_LOG_ERRNO(
 				"mbuf_coded_video_frame_queue_destroy:enc_out",
 				-err);
 	}
@@ -945,13 +1026,13 @@ static int destroy(struct venc_encoder *base)
 		err = pomp_loop_remove(base->loop,
 				       mbox_get_read_fd(self->mbox));
 		if (err < 0)
-			ULOG_ERRNO("pomp_loop_remove", -err);
+			VENC_LOG_ERRNO("pomp_loop_remove", -err);
 		mbox_destroy(self->mbox);
 	}
 	if (self->h265_reader) {
 		err = h265_reader_destroy(self->h265_reader);
 		if (err < 0)
-			ULOG_ERRNO("h265_reader_destroy", -err);
+			VENC_LOG_ERRNO("h265_reader_destroy", -err);
 	}
 	if (self->x265 != NULL && self->api != NULL)
 		self->api->encoder_close(self->x265);
@@ -961,7 +1042,7 @@ static int destroy(struct venc_encoder *base)
 
 	err = pomp_loop_idle_remove_by_cookie(base->loop, self);
 	if (err < 0)
-		ULOG_ERRNO("pomp_loop_idle_remove_by_cookie", -err);
+		VENC_LOG_ERRNO("pomp_loop_idle_remove_by_cookie", -err);
 
 	free(self);
 	base->derived = NULL;
@@ -978,7 +1059,7 @@ static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 	struct vdef_raw_frame info;
 	struct venc_x265 *self = userdata;
 
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, false);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, false);
 
 	if (atomic_load(&self->should_stop))
 		return false;
@@ -1001,7 +1082,7 @@ static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 	/* Input frame must be packed */
 	ret = mbuf_raw_video_frame_get_packed_buffer(frame, &tmp, &tmplen);
 	if (ret != 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_get_packed_buffer", -ret);
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_packed_buffer", -ret);
 		return false;
 	}
 	mbuf_raw_video_frame_release_packed_buffer(frame, tmp);
@@ -1051,7 +1132,7 @@ static int create(struct venc_encoder *base)
 {
 	int ret = 0;
 	struct venc_x265 *self = NULL;
-	x265_param x265_params;
+	x265_param *x265_params = NULL;
 	struct venc_config_x265 *specific;
 	const char *preset;
 	const char *tune;
@@ -1060,7 +1141,7 @@ static int create(struct venc_encoder *base)
 		.filter = input_filter,
 	};
 
-	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 
 	(void)pthread_once(&supported_formats_is_init,
 			   initialize_supported_formats);
@@ -1068,9 +1149,9 @@ static int create(struct venc_encoder *base)
 	/* Check the configuration */
 	if (base->config.encoding != VDEF_ENCODING_H265) {
 		ret = -EINVAL;
-		ULOG_ERRNO("invalid encoding: %s",
-			   -ret,
-			   vdef_encoding_to_str(base->config.encoding));
+		VENC_LOG_ERRNO("invalid encoding: %s",
+			       -ret,
+			       vdef_encoding_to_str(base->config.encoding));
 		return ret;
 	}
 	if ((base->config.output.preferred_format !=
@@ -1080,15 +1161,15 @@ static int create(struct venc_encoder *base)
 	    (base->config.output.preferred_format !=
 	     VDEF_CODED_DATA_FORMAT_AVCC)) {
 		ret = -ENOSYS;
-		ULOG_ERRNO("unsupported output format: %s",
-			   -ret,
-			   vdef_coded_data_format_to_str(
-				   base->config.output.preferred_format));
+		VENC_LOG_ERRNO("unsupported output format: %s",
+			       -ret,
+			       vdef_coded_data_format_to_str(
+				       base->config.output.preferred_format));
 		return ret;
 	}
 	if (base->cbs.frame_output == NULL) {
 		ret = -EINVAL;
-		ULOG_ERRNO("invalid frame output callback", -ret);
+		VENC_LOG_ERRNO("invalid frame output callback", -ret);
 		return ret;
 	}
 
@@ -1110,9 +1191,13 @@ static int create(struct venc_encoder *base)
 
 	queue_args.filter_userdata = self;
 
+	atomic_init(&self->flushing, false);
+	atomic_init(&self->flush_discard, false);
+	atomic_init(&self->flush_sent, false);
+
 	ret = h265_reader_new(&h265_cbs, self, &self->h265_reader);
 	if (ret < 0) {
-		ULOG_ERRNO("h265_reader_new", -ret);
+		VENC_LOG_ERRNO("h265_reader_new", -ret);
 		goto error;
 	}
 
@@ -1120,7 +1205,7 @@ static int create(struct venc_encoder *base)
 	self->mbox = mbox_new(1);
 	if (self->mbox == NULL) {
 		ret = -ENOMEM;
-		ULOG_ERRNO("mbox_new", -ret);
+		VENC_LOG_ERRNO("mbox_new", -ret);
 		goto error;
 	}
 	ret = pomp_loop_add(base->loop,
@@ -1129,7 +1214,7 @@ static int create(struct venc_encoder *base)
 			    &mbox_cb,
 			    self);
 	if (ret < 0) {
-		ULOG_ERRNO("pomp_loop_add", -ret);
+		VENC_LOG_ERRNO("pomp_loop_add", -ret);
 		goto error;
 	}
 
@@ -1137,9 +1222,16 @@ static int create(struct venc_encoder *base)
 	self->api = x265_api_get(base->config.input.info.bit_depth);
 	if (self->api == NULL) {
 		ret = -EINVAL;
-		ULOG_ERRNO("no x265 API available for %d bits",
-			   -ret,
-			   base->config.input.info.bit_depth);
+		VENC_LOG_ERRNO("no x265 API available for %d bits",
+			       -ret,
+			       base->config.input.info.bit_depth);
+		goto error;
+	}
+
+	x265_params = calloc(1, sizeof(*x265_params));
+	if (x265_params == NULL) {
+		ret = -ENOMEM;
+		VENC_LOG_ERRNO("calloc", -ret);
 		goto error;
 	}
 
@@ -1147,9 +1239,9 @@ static int create(struct venc_encoder *base)
 	preset =
 		(specific && specific->preset) ? specific->preset : "superfast";
 	tune = (specific && specific->tune) ? specific->tune : "psnr";
-	ret = self->api->param_default_preset(&x265_params, preset, tune);
+	ret = self->api->param_default_preset(x265_params, preset, tune);
 	if (ret < 0) {
-		ULOG_ERRNO("x265_param_default_preset", -ret);
+		VENC_LOG_ERRNO("x265_param_default_preset", -ret);
 		goto error;
 	}
 
@@ -1160,66 +1252,65 @@ static int create(struct venc_encoder *base)
 		base->config.h265.level = VENC_X265_LEVEL_5_1;
 
 	/* TODO */
-	x265_params.sourceWidth = base->config.input.info.resolution.width;
-	x265_params.sourceHeight = base->config.input.info.resolution.height;
-	x265_params.fpsNum = base->config.input.info.framerate.num;
-	x265_params.fpsDenom = base->config.input.info.framerate.den;
-	x265_params.levelIdc = base->config.h265.level;
-	x265_params.bframes = 0;
-	x265_params.sourceBitDepth = base->config.input.info.bit_depth;
-	x265_params.keyframeMax =
+	x265_params->sourceWidth = base->config.input.info.resolution.width;
+	x265_params->sourceHeight = base->config.input.info.resolution.height;
+	x265_params->fpsNum = base->config.input.info.framerate.num;
+	x265_params->fpsDenom = base->config.input.info.framerate.den;
+	x265_params->levelIdc = base->config.h265.level;
+	x265_params->bframes = 0;
+	x265_params->sourceBitDepth = base->config.input.info.bit_depth;
+	x265_params->keyframeMax =
 		(int)(base->config.h265.gop_length_sec *
 			      base->config.input.info.framerate.num /
 			      base->config.input.info.framerate.den +
 		      0.5);
-	x265_params.bEnableWeightedPred = 0;
-	x265_params.bEnableWeightedBiPred = 0;
-	x265_params.bEnablePsnr = 1;
-	x265_params.bRepeatHeaders = 0;
-	x265_params.bAnnexB = 0;
-	x265_params.bEmitIDRRecoverySEI =
+	x265_params->bEnableWeightedPred = 0;
+	x265_params->bEnableWeightedBiPred = 0;
+	x265_params->bEnablePsnr = 1;
+	x265_params->bRepeatHeaders = 0;
+	x265_params->bAnnexB = 0;
+	x265_params->bEmitIDRRecoverySEI =
 		base->config.h265.insert_recovery_point_sei;
 	switch (base->config.h265.rate_control) {
 	default:
 	case VENC_RATE_CONTROL_CBR:
-		x265_params.rc.rateControlMode = X265_RC_ABR;
-		x265_params.rc.bitrate =
+		x265_params->rc.rateControlMode = X265_RC_ABR;
+		x265_params->rc.bitrate =
 			(base->config.h265.max_bitrate + 500) / 1000;
-		x265_params.rc.vbvMaxBitrate =
-			(base->config.h265.max_bitrate + 500) / 1000;
-		x265_params.rc.vbvBufferSize =
-			(base->config.h265.max_bitrate + 500) / 1000;
+		x265_params->rc.vbvMaxBitrate = x265_params->rc.bitrate;
+		x265_params->rc.vbvBufferSize = x265_params->rc.bitrate;
 		break;
 	case VENC_RATE_CONTROL_VBR:
-		x265_params.rc.rateControlMode = X265_RC_ABR;
-		x265_params.rc.bitrate =
+		x265_params->rc.rateControlMode = X265_RC_ABR;
+		x265_params->rc.bitrate =
 			(base->config.h265.max_bitrate + 500) / 1000;
 		break;
 	case VENC_RATE_CONTROL_CQ:
-		x265_params.rc.rateControlMode = X265_RC_CQP;
-		x265_params.rc.qp = base->config.h265.qp;
+		x265_params->rc.rateControlMode = X265_RC_CQP;
+		x265_params->rc.qp = base->config.h265.qp;
 		break;
 	}
 
 	ret = self->api->param_apply_profile(
-		&x265_params,
+		x265_params,
 		bit_depth_to_profile(base->config.input.info.bit_depth));
 	if (ret < 0) {
-		ULOG_ERRNO("x265_param_apply_profile", -ret);
+		VENC_LOG_ERRNO("x265_param_apply_profile", -ret);
 		goto error;
 	}
 
 	/* Initialize the encoder */
-	self->x265 = self->api->encoder_open(&x265_params);
+	self->x265 = self->api->encoder_open(x265_params);
 	if (self->x265 == NULL) {
-		ULOGE("x265_encoder_open failed");
+		VENC_LOGE("x265_encoder_open failed");
 		ret = -EPROTO;
 		goto error;
 	}
 
-	ULOGI("x265 implementation - build %d", X265_BUILD);
+	VENC_LOGI("x265 implementation - build %d", X265_BUILD);
+	VENC_LOGI("preset=%s tune=%s", preset, tune);
 
-	self->api->picture_init(&x265_params, &self->in_picture);
+	self->api->picture_init(x265_params, &self->in_picture);
 
 	fmt = &base->config.input.format;
 	self->in_picture.colorSpace = X265_CSP_I420;
@@ -1252,8 +1343,10 @@ static int create(struct venc_encoder *base)
 
 	/* Generate the VPS, SPS and PPS */
 	ret = generate_ps(self);
-	if (ret < 0)
+	if (ret < 0) {
+		VENC_LOG_ERRNO("generate_ps", -ret);
 		goto error;
+	}
 
 	/* Initialize the H.265 writer */
 	ret = venc_h265_writer_new(base->h265.vps,
@@ -1263,35 +1356,45 @@ static int create(struct venc_encoder *base)
 				   base->h265.pps,
 				   base->h265.pps_size,
 				   &base->h265.ctx);
-	if (ret < 0)
+	if (ret < 0) {
+		VENC_LOG_ERRNO("venc_h265_writer_new", -ret);
 		goto error;
+	}
+
+	/* Patch the PS */
+	ret = venc_h265_patch_ps(base);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("venc_h265_patch_ps", -ret);
+		goto error;
+	}
 
 	/* Create the input buffers queue */
 	ret = mbuf_raw_video_frame_queue_new_with_args(&queue_args,
 						       &self->in_queue);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_queue_new_with_args:input",
-			   -ret);
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_new_with_args:input",
+			       -ret);
 		goto error;
 	}
 
 	/* Create the encoder input buffers queue */
 	ret = mbuf_raw_video_frame_queue_new(&self->enc_in_queue);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_queue_new:enc_in", -ret);
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_new:enc_in", -ret);
 		goto error;
 	}
 
 	/* Create the encoder output buffers queue */
 	ret = mbuf_coded_video_frame_queue_new(&self->enc_out_queue);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_queue_new:enc_out", -ret);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_queue_new:enc_out",
+			       -ret);
 		goto error;
 	}
 	ret = mbuf_coded_video_frame_queue_get_event(self->enc_out_queue,
 						     &self->enc_out_queue_evt);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_queue_get_event", -ret);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_queue_get_event", -ret);
 		goto error;
 	}
 	ret = pomp_evt_attach_to_loop(self->enc_out_queue_evt,
@@ -1299,7 +1402,7 @@ static int create(struct venc_encoder *base)
 				      &enc_out_queue_evt_cb,
 				      self);
 	if (ret < 0) {
-		ULOG_ERRNO("pomp_evt_attach_to_loop", -ret);
+		VENC_LOG_ERRNO("pomp_evt_attach_to_loop", -ret);
 		goto error;
 	}
 
@@ -1307,14 +1410,18 @@ static int create(struct venc_encoder *base)
 	ret = pthread_create(&self->thread, NULL, encoder_thread, (void *)self);
 	if (ret != 0) {
 		ret = -ret;
-		ULOG_ERRNO("pthread_create", -ret);
+		VENC_LOG_ERRNO("pthread_create", -ret);
 		goto error;
 	}
 	self->thread_launched = true;
 
+	free(x265_params);
+
 	return 0;
 
 error:
+	free(x265_params);
+
 	/* Cleanup on error */
 	destroy(base);
 	base->derived = NULL;
@@ -1357,20 +1464,26 @@ static int set_dyn_config(struct venc_encoder *base,
 			  const struct venc_dyn_config *config)
 {
 	int ret, update_config = 0;
-	x265_param x265_params;
+	x265_param *x265_params = NULL;
 	struct venc_x265 *self;
 
 	self = base->derived;
 
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
 
-	memset(&x265_params, 0, sizeof(x265_params));
-	self->api->encoder_parameters(self->x265, &x265_params);
+	x265_params = calloc(1, sizeof(*x265_params));
+	if (x265_params == NULL) {
+		ret = -ENOMEM;
+		VENC_LOG_ERRNO("calloc", -ret);
+		return ret;
+	}
+
+	self->api->encoder_parameters(self->x265, x265_params);
 
 	if (base->config.h265.rate_control == VENC_RATE_CONTROL_CQ &&
 	    config->qp != 0 && base->config.h265.qp != config->qp) {
 		base->config.h265.qp = config->qp;
-		x265_params.rc.qp = base->config.h265.qp;
+		x265_params->rc.qp = base->config.h265.qp;
 		update_config = 1;
 	}
 
@@ -1379,10 +1492,7 @@ static int set_dyn_config(struct venc_encoder *base,
 	    base->config.h265.rate_control != VENC_RATE_CONTROL_CQ) {
 		base->config.h265.target_bitrate = config->target_bitrate;
 		update_config = 1;
-		/* Dynamic reconfiguration of the bitrate works only when
-		 * rate control is CBR with i_nal_hrd set to
-		 * X265_NAL_HRD_NONE */
-		x265_params.rc.bitrate =
+		x265_params->rc.bitrate =
 			(base->config.h265.target_bitrate + 500) / 1000;
 	}
 
@@ -1392,14 +1502,18 @@ static int set_dyn_config(struct venc_encoder *base,
 
 	/* Update encoder parameters only if configuration changed */
 	if (update_config) {
-		ret = self->api->encoder_reconfig(self->x265, &x265_params);
+		ret = self->api->encoder_reconfig(self->x265, x265_params);
 		if (ret < 0) {
-			ULOG_ERRNO("x265_encoder_reconfig", -ret);
-			return ret;
+			VENC_LOG_ERRNO("x265_encoder_reconfig", -ret);
+			goto out;
 		}
 	}
 
-	return 0;
+	ret = 0;
+
+out:
+	free(x265_params);
+	return ret;
 }
 
 
@@ -1407,7 +1521,7 @@ static int request_idr(struct venc_encoder *base)
 {
 	struct venc_x265 *self = base->derived;
 
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
 
 	atomic_store(&self->insert_idr, true);
 
@@ -1418,6 +1532,8 @@ static int request_idr(struct venc_encoder *base)
 const struct venc_ops venc_x265_ops = {
 	.get_supported_encodings = get_supported_encodings,
 	.get_supported_input_formats = get_supported_input_formats,
+	.copy_implem_cfg = copy_implem_cfg,
+	.free_implem_cfg = free_implem_cfg,
 	.create = create,
 	.flush = flush,
 	.stop = stop,

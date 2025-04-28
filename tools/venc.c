@@ -407,7 +407,7 @@ static int frame_output(struct venc_prog *self,
 			struct mbuf_coded_video_frame *out_frame)
 {
 	int res = 0;
-	struct vdef_coded_frame out_info;
+	struct vdef_coded_frame out_info = {};
 	const uint8_t *data;
 	const void *nalu_data;
 	struct vdef_nalu nalu;
@@ -434,9 +434,10 @@ static int frame_output(struct venc_prog *self,
 
 	nalu_count = mbuf_coded_video_frame_get_nalu_count(out_frame);
 
-	ULOGI("encoded frame #%d type=%s nalu_count=%zu "
+	ULOGI("encoded frame #%d layer=%u type=%s nalu_count=%zu "
 	      "(dequeue: %.2fms, encode: %.2fms, overall: %.2fms)",
 	      out_info.info.index,
+	      out_info.layer,
 	      vdef_coded_frame_type_to_str(out_info.type),
 	      nalu_count,
 	      (float)(dequeue_time - input_time) / 1000.,
@@ -450,6 +451,7 @@ static int frame_output(struct venc_prog *self,
 	switch (out_info.format.data_format) {
 	case VDEF_CODED_DATA_FORMAT_BYTE_STREAM:
 	case VDEF_CODED_DATA_FORMAT_JFIF:
+	case VDEF_CODED_DATA_FORMAT_UNKNOWN:
 		for (i = 0; i < nalu_count; i++) {
 			res = mbuf_coded_video_frame_get_nalu(
 				out_frame, i, &nalu_data, &nalu);
@@ -606,6 +608,8 @@ enum args_id {
 	ARGS_ID_MATRIX,
 	ARGS_ID_SAR,
 	ARGS_ID_MIN_BUF_COUNT,
+	ARGS_ID_INSERT_PIC_TIMING_SEI,
+	ARGS_ID_SET_NRI_BITS,
 };
 
 
@@ -650,6 +654,11 @@ static const struct option long_options[] = {
 	 required_argument,
 	 NULL,
 	 ARGS_ID_MIN_BUF_COUNT},
+	{"insert-pic-timing-sei",
+	 no_argument,
+	 NULL,
+	 ARGS_ID_INSERT_PIC_TIMING_SEI},
+	{"set-nri-bits", no_argument, NULL, ARGS_ID_SET_NRI_BITS},
 	{0, 0, 0, 0},
 };
 
@@ -702,10 +711,10 @@ static void usage(char *prog_name)
 	       "  -o | --outfile <file_name>           "
 		       "H.264/H.265 Annex B byte stream output file "
 		       "(.264/.h264/.265/.h265) or JPEG/MJPEG file "
-		       "(.jpg/.jpeg/.mjpg/.mjpeg)\n"
+		       "(.jpg/.jpeg/.mjpg/.mjpeg) or PNG file (.png)\n"
 	       "  -e | --encoding <enc>                "
 		       "Output encoding (e.g. \"H264\", \"H265\", "
-		       "\"JPEG\", \"MJPEG\"...)\n"
+		       "\"JPEG\", \"MJPEG\", \"PNG\"...)\n"
 	       "  -r | --rc <val>                      "
 		       "Rate control algorithm (e.g. \"CBR\", \"VBR\" "
 		       "or \"CQ\"; default is \"CBR\")\n"
@@ -713,7 +722,11 @@ static void usage(char *prog_name)
 		       "Bitrate (bit/s) for CBR and VBR rate-control; "
 		       "default is 5000000\n"
 	       "  -q | --qp <qp>                       "
-		       "Quantization parameter for CQ rate-control ([1..51])\n"
+		       "Based on the encoding this means:\n"
+	       "              H.264 or H.265: Quantization parameter for CQ "
+						      "rate-control ([1..51])\n"
+	       "              JPEG: Quality factor ([1..99])\n"
+	       "              PNG : Compression level ([0..9])\n"
 	       "       --min-qp <qp>                   "
 		       "Minimum quantization parameter ([1..51])\n"
 	       "       --max-qp <qp>                   "
@@ -752,6 +765,11 @@ static void usage(char *prog_name)
 	       "       --sar <w:h>                     "
 		       "Source aspect ratio; format w:h "
 		       "(unused if input is *.y4m)\n"
+	       "       --insert-pic-timing-sei         "
+		       "Insert picture timing SEI before each frame\n"
+	       "       --set-nri-bits                  "
+		       "Set the H.264 NAL units header NRI bits according "
+		       "to RFC6184"
 	       "\n",
 	       prog_name);
 	/* clang-format on */
@@ -784,25 +802,24 @@ int main(int argc, char **argv)
 	unsigned int target_bitrate = 0; /* TODO */
 	unsigned int cpb_size = 0; /* TODO */
 	float gop_length_sec = 0.;
-	unsigned int base_frame_interval = 0; /* TODO */
-	unsigned int ref_frame_interval = 0; /* TODO */
+	unsigned int base_frame_interval = 0;
+	unsigned int ref_frame_interval = 0;
 	unsigned int preferred_min_buf_count = 0;
 	unsigned int slice_size_mbrows = 0;
 	enum venc_entropy_coding entropy_coding =
 		VENC_ENTROPY_CODING_CABAC; /* TODO */
-	enum venc_intra_refresh intra_refresh =
-		VENC_INTRA_REFRESH_NONE; /* TODO */
-	unsigned int intra_refresh_period = 0; /* TODO */
-	unsigned int intra_refresh_length = 0; /* TODO */
+	enum venc_intra_refresh intra_refresh = VENC_INTRA_REFRESH_NONE;
+	unsigned int intra_refresh_period = 0;
+	unsigned int intra_refresh_length = 0;
 	int insert_ps = 1;
 	int insert_aud = 0; /* TODO */
 	int insert_recovery_point_sei = 0; /* TODO */
-	int insert_pic_timing_sei = 0; /* TODO */
+	int insert_pic_timing_sei = 0;
 	int insert_mdcv_sei = 0; /* TODO */
 	int insert_cll_sei = 0; /* TODO */
 	int streaming_user_data_sei_version = 0; /* TODO */
 	int serialize_user_data = 0;
-	int rfc6184_nri_bits = 0; /* TODO */
+	int rfc6184_nri_bits = 0;
 	unsigned int plane_count;
 
 	s_stopping = 0;
@@ -1018,6 +1035,14 @@ int main(int argc, char **argv)
 			sscanf(optarg, "%u", &preferred_min_buf_count);
 			break;
 
+		case ARGS_ID_INSERT_PIC_TIMING_SEI:
+			insert_pic_timing_sei = 1;
+			break;
+
+		case ARGS_ID_SET_NRI_BITS:
+			rfc6184_nri_bits = 1;
+			break;
+
 		default:
 			usage(argv[0]);
 			status = EXIT_FAILURE;
@@ -1155,11 +1180,8 @@ int main(int argc, char **argv)
 		printf("Output: file '%s'\n", output);
 	}
 	self->output.encoding = self->config.encoding;
-
 	self->config.output.preferred_format =
-		(self->config.encoding == VDEF_ENCODING_MJPEG)
-			? VDEF_CODED_DATA_FORMAT_JFIF
-			: VDEF_CODED_DATA_FORMAT_BYTE_STREAM;
+		VDEF_CODED_DATA_FORMAT_BYTE_STREAM;
 
 	if (self->input.decimation == 0)
 		self->input.decimation = 1;
@@ -1227,10 +1249,17 @@ int main(int argc, char **argv)
 		self->config.h265.serialize_user_data = serialize_user_data;
 		break;
 	case VDEF_ENCODING_MJPEG:
+		self->config.output.preferred_format =
+			VDEF_CODED_DATA_FORMAT_JFIF;
 		self->config.mjpeg.rate_control = rate_control;
 		self->config.mjpeg.quality = qp;
 		self->config.mjpeg.max_bitrate = max_bitrate;
 		self->config.mjpeg.target_bitrate = target_bitrate;
+		break;
+	case VDEF_ENCODING_PNG:
+		self->config.output.preferred_format =
+			VDEF_CODED_DATA_FORMAT_UNKNOWN;
+		self->config.png.compression_level = qp;
 		break;
 	default:
 		break;
@@ -1339,8 +1368,11 @@ int main(int argc, char **argv)
 	time_get_monotonic(&cur_ts);
 	time_timespec_to_us(&cur_ts, &start_time);
 
-	while (!self->stopped)
-		pomp_loop_wait_and_process(self->loop, -1);
+	while (!self->stopped) {
+		res = pomp_loop_wait_and_process(self->loop, -1);
+		if (res)
+			ULOG_ERRNO("pomp_loop_wait_and_process", -res);
+	}
 
 	time_get_monotonic(&cur_ts);
 	time_timespec_to_us(&cur_ts, &end_time);

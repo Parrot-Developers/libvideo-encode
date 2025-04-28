@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2017 Parrot Drones SAS
+ * Copyright (c) 2023 Parrot Drones SAS
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -24,48 +24,60 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#define ULOG_TAG venc_turbojpeg
+#define ULOG_TAG venc_png
 #include <ulog.h>
 ULOG_DECLARE_TAG(ULOG_TAG);
 
-#include "venc_turbojpeg_priv.h"
-
+#include "venc_png_priv.h"
+#include <setjmp.h>
 
 #define NB_SUPPORTED_ENCODINGS 1
-#define NB_SUPPORTED_FORMATS 4
+#define NB_SUPPORTED_FORMATS 6
 
 static struct vdef_raw_format supported_formats[NB_SUPPORTED_FORMATS];
 static enum vdef_encoding supported_encodings[NB_SUPPORTED_ENCODINGS];
 static pthread_once_t supported_formats_is_init = PTHREAD_ONCE_INIT;
 
+struct mem_encode {
+	png_bytep data;
+	size_t capacity;
+	size_t len;
+};
+
+
 static void initialize_supported_formats(void)
 {
-	supported_formats[0] = vdef_i420;
-	supported_formats[1] = vdef_nv12;
-	supported_formats[2] = vdef_nv21;
-	supported_formats[3] = vdef_gray;
-	supported_encodings[0] = VDEF_ENCODING_MJPEG;
+	supported_formats[0] = vdef_gray;
+	supported_formats[1] = vdef_gray16;
+	supported_formats[2] = vdef_raw8;
+	supported_formats[3] = vdef_raw16;
+	supported_formats[4] = vdef_raw16_be;
+	supported_formats[5] = vdef_rgb;
+	supported_encodings[0] = VDEF_ENCODING_PNG;
 }
+
 
 static void call_flush_done(void *userdata)
 {
-	struct venc_turbojpeg *self = userdata;
+	struct venc_png *self = userdata;
 
 	if (self->base->cbs.flush)
 		self->base->cbs.flush(self->base, self->base->userdata);
 }
 
+
 static void call_stop_done(void *userdata)
 {
-	struct venc_turbojpeg *self = userdata;
+	struct venc_png *self = userdata;
 
 	if (self->base->cbs.stop)
 		self->base->cbs.stop(self->base, self->base->userdata);
 }
 
+
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
-	struct venc_turbojpeg *self = userdata;
+	struct venc_png *self = userdata;
 	int ret, err;
 	char message;
 
@@ -102,11 +114,12 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 	} while (ret == 0);
 }
 
+
 static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 {
-	struct venc_turbojpeg *self = userdata;
+	struct venc_png *self = userdata;
 	struct mbuf_coded_video_frame *out_frame = NULL;
-	int ret, err;
+	int ret;
 	do {
 		ret = mbuf_coded_video_frame_queue_pop(self->enc_out_queue,
 						       &out_frame);
@@ -121,19 +134,18 @@ static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 		self->base->cbs.frame_output(
 			self->base, 0, out_frame, self->base->userdata);
 		self->base->counters.out++;
-		err = mbuf_coded_video_frame_unref(out_frame);
-		if (err < 0)
-			VENC_LOG_ERRNO("mbuf_coded_video_frame_unref", -err);
+		mbuf_coded_video_frame_unref(out_frame);
 	} while (ret == 0);
 }
 
-static int fill_frame(struct venc_turbojpeg *self,
+
+static int fill_frame(struct venc_png *self,
 		      struct mbuf_raw_video_frame *in_frame,
 		      struct mbuf_coded_video_frame *out_frame,
 		      unsigned char *out_picture,
 		      unsigned int out_picture_size)
 {
-	int ret = 0, err = 0;
+	int ret = 0;
 	struct vmeta_frame *metadata = NULL;
 	struct vdef_nalu nalu = {0};
 	void *nalu_data;
@@ -186,36 +198,56 @@ static int fill_frame(struct venc_turbojpeg *self,
 
 out:
 	if (mem) {
-		err = mbuf_mem_unref(mem);
-		if (err != 0)
-			VENC_LOG_ERRNO("mbuf_mem_unref", -err);
+		ret = mbuf_mem_unref(mem);
+		if (ret != 0)
+			VENC_LOG_ERRNO("mbuf_mem_unref", -ret);
 	}
-	if (metadata) {
-		err = vmeta_frame_unref(metadata);
-		if (err < 0)
-			VENC_LOG_ERRNO("vmeta_frame_unref", -err);
-	}
+	if (metadata)
+		vmeta_frame_unref(metadata);
 	return ret;
 }
 
-static int encode_frame(struct venc_turbojpeg *self,
+
+static void
+png_write_data_cb(png_structp png_ptr, png_bytep data, png_size_t length)
+{
+	struct mem_encode *p = (struct mem_encode *)png_get_io_ptr(png_ptr);
+	size_t nsize = p->len + length;
+
+	/* Allocate or grow buffer */
+	if ((p->data == NULL) || (nsize > p->capacity)) {
+		p->data = (png_bytep)realloc(p->data, nsize);
+		if (!p->data)
+			png_error(png_ptr, "Write Error");
+		else
+			p->capacity = nsize;
+	}
+
+	/* Copy new bytes to end of buffer */
+	if (p->data) {
+		memcpy(p->data + p->len, data, length);
+		p->len += length;
+	}
+}
+
+
+static int encode_frame(struct venc_png *self,
 			struct mbuf_raw_video_frame *in_frame)
 {
 	int ret, err;
-	unsigned char *out_picture = NULL;
-	long unsigned int out_picture_size = 0;
 	size_t len;
 	struct vdef_raw_frame in_info;
 	const void *plane_data;
-	const uint8_t *in_data;
 	struct mbuf_coded_video_frame *out_frame = NULL;
 	struct vdef_coded_frame out_info = {};
 	struct timespec cur_ts = {0, 0};
 	uint64_t ts_us;
-	const uint8_t *mbuf_planes[VDEF_RAW_MAX_PLANE_COUNT] = {};
-	/* only needed when converting from NV12 to I420 */
-	uint8_t *u_plane = NULL;
-	uint8_t *v_plane = NULL;
+	png_structp png_handle = NULL;
+	png_infop png_info = NULL;
+	/* codecheck_ignore[VOLATILE] */
+	png_bytepp volatile row_pointers = NULL;
+	struct mem_encode mem_out = {0};
+	size_t frame_size = 0;
 
 	struct mbuf_coded_video_frame_cbs frame_cbs = {
 		.pre_release = self->base->cbs.pre_release,
@@ -245,7 +277,7 @@ static int encode_frame(struct venc_turbojpeg *self,
 		return ret;
 	}
 
-	if (self->in_picture.planes > SOFTMPEG_MAX_PLANES) {
+	if (self->in_picture.planes > SOFTPNG_MAX_PLANES) {
 		VENC_LOGE("invalid number of planes: %d",
 			  self->in_picture.planes);
 		return -EINVAL;
@@ -254,19 +286,16 @@ static int encode_frame(struct venc_turbojpeg *self,
 	for (unsigned int i = 0; i < self->in_picture.planes; i++) {
 		ret = mbuf_raw_video_frame_get_plane(
 			in_frame, i, &plane_data, &len);
-		if (ret == 0) {
-			in_data = plane_data;
-			mbuf_planes[i] = (uint8_t *)in_data;
-			self->in_picture.plane[i] = (uint8_t *)in_data;
-			self->in_picture.stride[i] = in_info.plane_stride[i];
-		}
 		if (ret < 0) {
-			/* TODO: don't forget to drop the frame
-			 * otherwise it remains in the queue. */
 			VENC_LOG_ERRNO(
-				"mbuf_raw_video_frame_get_plane:%u", -ret, i);
-			goto out;
+				"mbuf_raw_video_frame_get_plane(%u)", -ret, i);
+			return ret;
 		}
+
+		self->in_picture.plane[i] = (uint8_t *)plane_data;
+		self->in_picture.stride[i] = in_info.plane_stride[i];
+		mbuf_raw_video_frame_release_plane(in_frame, i, plane_data);
+		frame_size += len;
 	}
 
 	err = mbuf_raw_video_frame_add_ancillary_buffer(
@@ -278,53 +307,73 @@ static int encode_frame(struct venc_turbojpeg *self,
 		VENC_LOGW_ERRNO("mbuf_raw_video_frame_add_ancillary_buffer",
 				-err);
 
-	if (vdef_raw_format_cmp(&in_info.format, &vdef_nv12) ||
-	    vdef_raw_format_cmp(&in_info.format, &vdef_nv21)) {
-		int i = 0;
-		int width = self->in_picture.stride[1] / 2;
-		int height = self->in_picture.height / 2;
-		int up_offset = 0, vp_offset = 1;
+	/* allocate out buffer to be used by libpng to avoid multiple realloc
+	 * in the libpng write data callback */
+	mem_out.capacity = frame_size;
+	mem_out.data = (png_bytep)malloc(mem_out.capacity);
+	if (!mem_out.data) {
+		VENC_LOGE("failed to allocate output data");
+		return -ENOMEM;
+	}
 
-		/* we get the plane containing UV */
-		const unsigned char *plane = self->in_picture.plane[1];
-		self->in_picture.stride[1] = width;
-		self->in_picture.stride[2] = width;
-		u_plane = (uint8_t *)calloc(width * height, sizeof(*u_plane));
-		v_plane = (uint8_t *)calloc(width * height, sizeof(*v_plane));
-		if (!u_plane || !v_plane) {
-			ret = -ENOMEM;
-			VENC_LOG_ERRNO("calloc", -ret);
-			goto out;
-		}
-		if (vdef_raw_format_cmp(&in_info.format, &vdef_nv21)) {
-			up_offset = 1;
-			vp_offset = 0;
-		}
-
-		for (i = 0; i < (width * height); i++) {
-			u_plane[i] = plane[2 * i + up_offset];
-			v_plane[i] = plane[2 * i + vp_offset];
-		}
-		self->in_picture.plane[1] = (const unsigned char *)u_plane;
-		self->in_picture.plane[2] = (const unsigned char *)v_plane;
+	png_handle = png_create_write_struct(
+		PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+	if (!png_handle) {
+		VENC_LOGE("failed to create png write struct");
+		ret = -ENOMEM;
+		goto out;
 	}
 
 	self->base->counters.pushed++;
 
-	ret = tjCompressFromYUVPlanes(self->tj_handler,
-				      self->in_picture.plane,
-				      self->in_picture.width,
-				      self->in_picture.stride,
-				      self->in_picture.height,
-				      self->in_picture.subsamp,
-				      &out_picture,
-				      &out_picture_size,
-				      self->in_picture.quality,
-				      self->in_picture.flags);
-	if (ret < 0) {
-		VENC_LOGE("%s", tjGetErrorStr());
-		return ret;
+	png_info = png_create_info_struct(png_handle);
+	if (!png_info) {
+		VENC_LOGE("failed to create png info struct");
+		ret = -ENOMEM;
+		goto out;
 	}
+
+	png_set_IHDR(png_handle,
+		     png_info,
+		     self->in_picture.width,
+		     self->in_picture.height,
+		     self->in_picture.bit_depth,
+		     self->in_picture.color_type,
+		     PNG_INTERLACE_NONE,
+		     PNG_COMPRESSION_TYPE_DEFAULT,
+		     PNG_FILTER_TYPE_DEFAULT);
+
+	png_set_write_fn(png_handle, &mem_out, png_write_data_cb, NULL);
+
+	png_set_compression_level(png_handle,
+				  (int)self->in_picture.compression_level);
+
+	png_write_info(png_handle, png_info);
+
+	if (self->in_picture.data_little_endian)
+		png_set_swap(png_handle);
+
+	row_pointers =
+		(png_bytepp)malloc(sizeof(png_bytep) * self->in_picture.height);
+	if (!row_pointers) {
+		VENC_LOGE("failed to allocate row pointers");
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	for (unsigned int idx = 0; idx < self->in_picture.height; idx++)
+		row_pointers[idx] =
+			(png_byte *)(self->in_picture.plane[0] +
+				     (idx * self->in_picture.stride[0]));
+
+	if (setjmp(png_jmpbuf(png_handle))) {
+		VENC_LOGE("png jump error handling");
+		ret = -EIO;
+		goto out;
+	}
+
+	png_write_image(png_handle, row_pointers);
+	png_write_end(png_handle, NULL);
 
 	self->base->counters.pulled++;
 
@@ -343,8 +392,7 @@ static int encode_frame(struct venc_turbojpeg *self,
 	if (ret < 0)
 		VENC_LOG_ERRNO("mbuf_coded_video_frame_set_callbacks", -ret);
 
-	ret = fill_frame(
-		self, in_frame, out_frame, out_picture, out_picture_size);
+	ret = fill_frame(self, in_frame, out_frame, mem_out.data, mem_out.len);
 	if (ret < 0)
 		goto out;
 
@@ -375,32 +423,23 @@ static int encode_frame(struct venc_turbojpeg *self,
 	}
 
 out:
-	for (unsigned int i = 0; i < self->in_picture.planes; i++) {
-		if (mbuf_planes[i] == NULL)
-			continue;
-		int err = mbuf_raw_video_frame_release_plane(
-			in_frame, i, mbuf_planes[i]);
-		if (err < 0) {
-			VENC_LOG_ERRNO("mbuf_raw_video_frame_release_plane:%u",
-				       -err,
-				       i);
-		}
-		self->in_picture.plane[i] = NULL;
-	}
-	if (out_frame) {
-		err = mbuf_coded_video_frame_unref(out_frame);
-		if (err < 0)
-			VENC_LOG_ERRNO("mbuf_coded_video_frame_unref", -err);
-	}
-	if (out_picture)
-		tjFree(out_picture);
-	free(u_plane);
-	free(v_plane);
+	if (out_frame)
+		mbuf_coded_video_frame_unref(out_frame);
+
+	if (mem_out.data)
+		free(mem_out.data);
+
+	if (row_pointers)
+		free(row_pointers);
+
+	if (png_handle)
+		png_destroy_write_struct(&png_handle, &png_info);
 
 	return ret;
 }
 
-static int complete_flush(struct venc_turbojpeg *self)
+
+static int complete_flush(struct venc_png *self)
 {
 	int ret;
 
@@ -436,15 +475,14 @@ static int complete_flush(struct venc_turbojpeg *self)
 	return ret;
 }
 
-static void check_input_queue(struct venc_turbojpeg *self)
+
+static void check_input_queue(struct venc_png *self)
 {
 	int ret, err = 0;
 	struct mbuf_raw_video_frame *in_frame;
 
 	ret = mbuf_raw_video_frame_queue_peek(self->in_queue, &in_frame);
 	while (ret >= 0) {
-		/* Push the input frame */
-		/* Encode the frame */
 		ret = encode_frame(self, in_frame);
 		if (ret < 0) {
 			if (ret != -EAGAIN)
@@ -452,11 +490,7 @@ static void check_input_queue(struct venc_turbojpeg *self)
 			err = -ENOSPC;
 		}
 		if (in_frame) {
-			err = mbuf_raw_video_frame_unref(in_frame);
-			if (err < 0) {
-				VENC_LOG_ERRNO("mbuf_raw_video_frame_unref",
-					       -err);
-			}
+			mbuf_raw_video_frame_unref(in_frame);
 			/* Pop the frame for real */
 			ret = mbuf_raw_video_frame_queue_pop(self->in_queue,
 							     &in_frame);
@@ -465,11 +499,7 @@ static void check_input_queue(struct venc_turbojpeg *self)
 					       -ret);
 				break;
 			}
-			err = mbuf_raw_video_frame_unref(in_frame);
-			if (err < 0) {
-				VENC_LOG_ERRNO("mbuf_raw_video_frame_unref",
-					       -err);
-			}
+			mbuf_raw_video_frame_unref(in_frame);
 		}
 		if (err)
 			break;
@@ -504,9 +534,10 @@ static void check_input_queue(struct venc_turbojpeg *self)
 	}
 }
 
+
 static void input_event_cb(struct pomp_evt *evt, void *userdata)
 {
-	struct venc_turbojpeg *self = userdata;
+	struct venc_png *self = userdata;
 	check_input_queue(self);
 }
 
@@ -514,19 +545,19 @@ static void input_event_cb(struct pomp_evt *evt, void *userdata)
 static void *encoder_thread(void *ptr)
 {
 	int ret, timeout;
-	struct venc_turbojpeg *self = ptr;
+	struct venc_png *self = ptr;
 	struct pomp_loop *loop = NULL;
 	struct pomp_evt *in_queue_evt = NULL;
 	char message;
 
 #if defined(__APPLE__)
 #	if !TARGET_OS_IPHONE
-	ret = pthread_setname_np("venc_turbojpeg");
+	ret = pthread_setname_np("venc_png");
 	if (ret != 0)
 		VENC_LOG_ERRNO("pthread_setname_np", ret);
 #	endif
 #else
-	ret = pthread_setname_np(pthread_self(), "venc_turbojpeg");
+	ret = pthread_setname_np(pthread_self(), "venc_png");
 	if (ret != 0)
 		VENC_LOG_ERRNO("pthread_setname_np", ret);
 #endif
@@ -609,6 +640,7 @@ static int get_supported_encodings(const enum vdef_encoding **encodings)
 	return NB_SUPPORTED_ENCODINGS;
 }
 
+
 static int get_supported_input_formats(const struct vdef_raw_format **formats)
 {
 	(void)pthread_once(&supported_formats_is_init,
@@ -617,9 +649,10 @@ static int get_supported_input_formats(const struct vdef_raw_format **formats)
 	return NB_SUPPORTED_FORMATS;
 }
 
+
 static int flush(struct venc_encoder *base, int discard_)
 {
-	struct venc_turbojpeg *self;
+	struct venc_png *self;
 	bool discard = discard_;
 
 	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
@@ -632,9 +665,10 @@ static int flush(struct venc_encoder *base, int discard_)
 	return 0;
 }
 
+
 static int stop(struct venc_encoder *base)
 {
-	struct venc_turbojpeg *self;
+	struct venc_png *self;
 
 	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 
@@ -645,10 +679,11 @@ static int stop(struct venc_encoder *base)
 	return 0;
 }
 
+
 static int destroy(struct venc_encoder *base)
 {
 	int err;
-	struct venc_turbojpeg *self;
+	struct venc_png *self;
 
 	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 
@@ -695,28 +730,23 @@ static int destroy(struct venc_encoder *base)
 			VENC_LOG_ERRNO("pomp_loop_remove", -err);
 		mbox_destroy(self->mbox);
 	}
-	if (self->tj_handler) {
-		err = tjDestroy(self->tj_handler);
-		if (err < 0)
-			VENC_LOGE("%s", tjGetErrorStr());
-	}
 
 	err = pomp_loop_idle_remove_by_cookie(base->loop, self);
 	if (err < 0)
 		VENC_LOG_ERRNO("pomp_loop_idle_remove_by_cookie", -err);
 
-	self->in_picture.plane[0] = NULL;
-	self->in_picture.plane[1] = NULL;
-	self->in_picture.plane[2] = NULL;
+	for (unsigned int i = 0; i < self->in_picture.planes; i++)
+		self->in_picture.plane[i] = NULL;
 
 	xfree((void **)&self);
 	return 0;
 }
 
+
 static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 {
 	int ret;
-	struct venc_turbojpeg *self = userdata;
+	struct venc_png *self = userdata;
 	struct vdef_raw_frame info;
 
 	VENC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, false);
@@ -736,10 +766,11 @@ static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 	return true;
 }
 
+
 static int create(struct venc_encoder *base)
 {
 	int ret = 0;
-	struct venc_turbojpeg *self = NULL;
+	struct venc_png *self = NULL;
 	struct vdef_raw_format *fmt;
 	struct mbuf_raw_video_frame_queue_args queue_args = {
 		.filter = input_filter,
@@ -751,17 +782,15 @@ static int create(struct venc_encoder *base)
 			   initialize_supported_formats);
 
 	/* Check the configuration */
-	if (base->config.encoding != VDEF_ENCODING_MJPEG) {
+	if (base->config.encoding != VDEF_ENCODING_PNG) {
 		ret = -EINVAL;
 		VENC_LOG_ERRNO("invalid encoding: %s",
 			       -ret,
 			       vdef_encoding_to_str(base->config.encoding));
 		return ret;
 	}
-	if ((base->config.output.preferred_format !=
-	     VDEF_CODED_DATA_FORMAT_UNKNOWN) &&
-	    (base->config.output.preferred_format !=
-	     VDEF_CODED_DATA_FORMAT_JFIF)) {
+	if (base->config.output.preferred_format !=
+	    VDEF_CODED_DATA_FORMAT_UNKNOWN) {
 		ret = -ENOSYS;
 		VENC_LOG_ERRNO("unsupported output format: %s",
 			       -ret,
@@ -782,19 +811,13 @@ static int create(struct venc_encoder *base)
 	self->base = base;
 	base->derived = self;
 	self->output_format = (struct vdef_coded_format){
-		.encoding = VDEF_ENCODING_MJPEG,
-		.data_format = VDEF_CODED_DATA_FORMAT_JFIF,
+		.encoding = VDEF_ENCODING_PNG,
+		.data_format = VDEF_CODED_DATA_FORMAT_UNKNOWN,
 	};
 
 	queue_args.filter_userdata = self;
 
-	VENC_LOGI("turbojpeg implementation");
-
-	self->tj_handler = tjInitCompress();
-	if (!self->tj_handler) {
-		VENC_LOGE("%s", tjGetErrorStr());
-		goto error;
-	}
+	VENC_LOGI("png implementation");
 
 	/* Initialize the mailbox for inter-thread messages  */
 	self->mbox = mbox_new(1);
@@ -815,23 +838,24 @@ static int create(struct venc_encoder *base)
 
 	self->in_picture.width = base->config.input.info.resolution.width;
 	self->in_picture.height = base->config.input.info.resolution.height;
+	self->in_picture.bit_depth = base->config.input.info.bit_depth;
 
 	fmt = &base->config.input.format;
-	if (vdef_raw_format_cmp(fmt, &vdef_i420)) {
-		self->in_picture.subsamp = TJSAMP_420;
-		self->in_picture.planes = 3;
-	} else if (vdef_raw_format_cmp(fmt, &vdef_nv12) ||
-		   vdef_raw_format_cmp(fmt, &vdef_nv21)) {
-		/* Since libjpeg-turbo doesn't support NV12 and NV21,
-		 * we need to convert to I420. */
-		self->in_picture.subsamp = TJSAMP_420;
-		self->in_picture.planes = 2;
-	} else if (vdef_raw_format_cmp(fmt, &vdef_gray)) {
-		self->in_picture.subsamp = TJSAMP_GRAY;
+	if (vdef_raw_format_cmp(fmt, &vdef_gray) ||
+	    vdef_raw_format_cmp(fmt, &vdef_gray16) ||
+	    vdef_raw_format_cmp(fmt, &vdef_raw8) ||
+	    vdef_raw_format_cmp(fmt, &vdef_raw16) ||
+	    vdef_raw_format_cmp(fmt, &vdef_raw16_be)) {
+		self->in_picture.color_type = PNG_COLOR_TYPE_GRAY;
+		self->in_picture.planes = 1;
+	} else if (vdef_raw_format_cmp(fmt, &vdef_rgb)) {
+		self->in_picture.color_type = PNG_COLOR_TYPE_RGB;
 		self->in_picture.planes = 1;
 	}
 
-	self->in_picture.quality = base->config.mjpeg.quality;
+	self->in_picture.compression_level = base->config.png.compression_level;
+	self->in_picture.data_little_endian =
+		base->config.input.format.data_little_endian;
 
 	/* Create the input buffers queue */
 	ret = mbuf_raw_video_frame_queue_new_with_args(&queue_args,
@@ -885,6 +909,7 @@ error:
 	return ret;
 }
 
+
 static struct mbuf_pool *get_input_buffer_pool(struct venc_encoder *base)
 {
 	ULOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
@@ -893,46 +918,35 @@ static struct mbuf_pool *get_input_buffer_pool(struct venc_encoder *base)
 	return NULL;
 }
 
+
 static struct mbuf_raw_video_frame_queue *
 get_input_buffer_queue(struct venc_encoder *base)
 {
-	struct venc_turbojpeg *self;
+	struct venc_png *self;
 
 	ULOG_ERRNO_RETURN_VAL_IF(base == NULL, EINVAL, NULL);
 
-	self = (struct venc_turbojpeg *)base->derived;
+	self = (struct venc_png *)base->derived;
 
 	return self->in_queue;
 }
 
+
 static int get_dyn_config(struct venc_encoder *base,
 			  struct venc_dyn_config *config)
 {
-	config->target_bitrate = base->config.mjpeg.target_bitrate;
-	config->qp = base->config.mjpeg.quality;
-
-	return 0;
+	return -ENOSYS;
 }
+
 
 static int set_dyn_config(struct venc_encoder *base,
 			  const struct venc_dyn_config *config)
 {
-	struct venc_turbojpeg *self;
-	self = base->derived;
-
-	if (config->target_bitrate != 0 &&
-	    base->config.mjpeg.target_bitrate != config->target_bitrate &&
-	    base->config.mjpeg.rate_control != VENC_RATE_CONTROL_CQ) {
-		base->config.mjpeg.target_bitrate = config->target_bitrate;
-	}
-
-	if (config->qp != base->config.mjpeg.quality)
-		base->config.mjpeg.quality = config->qp;
-
-	return 0;
+	return -ENOSYS;
 }
 
-const struct venc_ops venc_turbojpeg_ops = {
+
+const struct venc_ops venc_png_ops = {
 	.get_supported_encodings = get_supported_encodings,
 	.get_supported_input_formats = get_supported_input_formats,
 	.create = create,

@@ -128,6 +128,26 @@ VENC_API enum venc_encoder_implem venc_get_auto_implem_by_encoding_and_format(
 
 
 /**
+ * Deep-copy the encoder configuration structure.
+ * When no longer needed, the instance must be freed using the
+ * venc_config_free() function.
+ * @param config: the encoder configuration to copy
+ * @param ret_obj: pointer to the new venc_config (output)
+ * @return 0 on success, negative errno value in case of error
+ */
+VENC_API int venc_config_copy(const struct venc_config *config,
+			      struct venc_config **ret_obj);
+
+
+/**
+ * Free the encoder configuration structure.
+ * @param config: the encoder configuration to free
+ * @return 0 on success, negative errno value in case of error
+ */
+VENC_API int venc_config_free(struct venc_config *config);
+
+
+/**
  * Create an encoder instance.
  * The configuration and callbacks structures must be filled.
  * The instance handle is returned through the venc parameter.

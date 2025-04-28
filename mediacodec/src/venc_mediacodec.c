@@ -28,91 +28,24 @@
 #include <ulog.h>
 ULOG_DECLARE_TAG(ULOG_TAG);
 
-#include <dlfcn.h>
-#include <pthread.h>
-#include <stdatomic.h>
-#include <stdbool.h>
-#include <stdlib.h>
-#include <string.h>
-
-#include <futils/timetools.h>
-#include <media-buffers/mbuf_mem_generic.h>
-#include <media/NdkMediaCodec.h>
-#include <media/NdkMediaFormat.h>
-#include <video-encode/venc_core.h>
-#include <video-encode/venc_h264.h>
-#include <video-encode/venc_h265.h>
-#include <video-encode/venc_internal.h>
-#include <video-encode/venc_mediacodec.h>
-
-enum state {
-	RUNNING,
-	WAITING_FOR_FLUSH,
-	WAITING_FOR_STOP,
-};
+#include "venc_mediacodec_priv.h"
 
 
-struct venc_mediacodec {
-	struct venc_encoder *base;
-
-	AMediaCodec *mc;
-
-	struct mbuf_raw_video_frame_queue *in_queue;
-	struct mbuf_raw_video_frame_queue *meta_queue;
-	struct mbuf_coded_video_frame_queue *out_queue;
-	struct pomp_evt *out_evt;
-
-	struct {
-		pthread_t thread;
-		bool thread_created;
-		pthread_mutex_t mutex;
-		pthread_cond_t cond;
-		bool stop_flag;
-		bool flush_flag;
-		bool eos_flag;
-	} push;
-
-	struct {
-		pthread_t thread;
-		bool thread_created;
-		pthread_mutex_t mutex;
-		pthread_cond_t cond;
-		bool stop_flag;
-		bool flush_flag;
-		bool eos_flag;
-	} pull;
-
-	struct {
-		uint8_t *vps;
-		size_t vps_size;
-		uint8_t *sps;
-		size_t sps_size;
-		uint8_t *pps;
-		size_t pps_size;
-	} pending;
-
-	bool eos_flag;
-
-	struct venc_dyn_config dynconf;
-
-	void *libmediandk_handle;
-	media_status_t (*set_parameters)(AMediaCodec *codec,
-					 const AMediaFormat *params);
-
-	enum state state;
-};
+#define INPUT_DEQUEUE_TIMEOUT_US 8000
+#define OUTPUT_DEQUEUE_TIMEOUT_US 8000
 
 
 #define MAX_SUPPORTED_ENCODINGS 2
-#define NB_SUPPORTED_FORMATS 2
+#define NB_SUPPORTED_FORMATS 3
 static struct vdef_raw_format supported_formats[NB_SUPPORTED_FORMATS];
 static enum vdef_encoding supported_encodings[MAX_SUPPORTED_ENCODINGS];
 static int nb_supported_encodings;
 static pthread_once_t supported_formats_is_init = PTHREAD_ONCE_INIT;
 static void initialize_supported_formats(void)
 {
-	supported_formats[0] = vdef_i420;
-	supported_formats[1] = vdef_nv12;
+	supported_formats[0] = vdef_nv12;
+	supported_formats[1] = vdef_i420;
+	supported_formats[2] = vdef_opaque;
 
 	enum vdef_encoding enc[] = {
 		VDEF_ENCODING_H264,
@@ -128,163 +61,16 @@ static void initialize_supported_formats(void)
 		if (mdec != NULL) {
 			supported_encodings[j] = enc[i];
 			j++;
-			AMediaCodec_delete(mdec);
+			media_status_t status = AMediaCodec_delete(mdec);
+			if (status != AMEDIA_OK) {
+				ULOGE("AMediaCodec_delete (%s:%d)",
+				      media_status_to_str(status),
+				      status);
+			}
 		}
 	}
 
 	nb_supported_encodings = j;
-}
-
-
-/* See
- * https://developer.android.com/reference/android/media/MediaCodecInfo.CodecCapabilities.html
- * for reference. */
-enum color_format {
-	YUV420_PLANAR = 0x00000013,
-	YUV420_PACKED_PLANAR = 0x00000014,
-	YUV420_SEMIPLANAR = 0x00000015,
-	YUV420_PACKED_SEMIPLANAR = 0x00000027,
-	TI_YUV420_PACKED_SEMIPLANAR = 0x7F000100,
-	QCOM_YUV420_SEMIPLANAR = 0x7FA30C00,
-	QCOM_YUV420_PACKED_SEMIPLANAR64X32_TILE2_M8KA = 0x7FA30C03,
-	QCOM_YUV420_SEMIPLANAR32_M = 0x7FA30C04,
-};
-
-
-/* See
- * https://developer.android.com/reference/android/media/MediaCodecInfo.CodecProfileLevel
- * for reference. */
-enum mc_h264_profile {
-	MC_H264_PROFILE_BASELINE = 0x1,
-	MC_H264_PROFILE_CONSTRAINED_BASELINE = 0x10000,
-	MC_H264_PROFILE_CONSTRAINED_HIGH = 0x80000,
-	MC_H264_PROFILE_EXTENDED = 0x4,
-	MC_H264_PROFILE_HIGH = 0x8,
-	MC_H264_PROFILE_HIGH10 = 0x10,
-	MC_H264_PROFILE_HIGH422 = 0x20,
-	MC_H264_PROFILE_HIGH444 = 0x40,
-	MC_H264_PROFILE_MAIN = 0x2,
-};
-
-
-static bool convert_h264_profile(unsigned int p, enum mc_h264_profile *o)
-{
-	switch (p) {
-	case H264_PROFILE_MAIN:
-		*o = MC_H264_PROFILE_MAIN;
-		return true;
-	default:
-		return false;
-	}
-}
-
-
-/* See
- * https://developer.android.com/reference/android/media/MediaCodecInfo.CodecProfileLevel
- * for reference. */
-enum mc_h264_level {
-	MC_H264_LEVEL_1 = 0x1,
-	MC_H264_LEVEL_11 = 0x4,
-	MC_H264_LEVEL_12 = 0x8,
-	MC_H264_LEVEL_13 = 0x10,
-	MC_H264_LEVEL_1b = 0x2,
-	MC_H264_LEVEL_2 = 0x20,
-	MC_H264_LEVEL_21 = 0x40,
-	MC_H264_LEVEL_22 = 0x80,
-	MC_H264_LEVEL_3 = 0x100,
-	MC_H264_LEVEL_31 = 0x200,
-	MC_H264_LEVEL_32 = 0x400,
-	MC_H264_LEVEL_4 = 0x800,
-	MC_H264_LEVEL_41 = 0x1000,
-	MC_H264_LEVEL_42 = 0x2000,
-	MC_H264_LEVEL_5 = 0x4000,
-	MC_H264_LEVEL_51 = 0x8000,
-	MC_H264_LEVEL_52 = 0x10000,
-	MC_H264_LEVEL_6 = 0x20000,
-	MC_H264_LEVEL_61 = 0x40000,
-	MC_H264_LEVEL_62 = 0x80000,
-};
-
-
-static bool convert_h264_level(unsigned int l, enum mc_h264_level *o)
-{
-	switch (l) {
-	case 40:
-		*o = MC_H264_LEVEL_4;
-		return true;
-	default:
-		return false;
-	}
-}
-
-
-/* See
- * https://developer.android.com/reference/android/media/MediaCodecInfo.CodecProfileLevel
- * for reference. */
-enum mc_h265_profile {
-	MC_H265_PROFILE_MAIN = 1,
-	MC_H265_PROFILE_MAIN10 = 2,
-	MC_H265_PROFILE_MAIN10_HDR10 = 4096,
-	MC_H265_PROFILE_MAIN10_HDR10PLUS = 8192,
-	MC_H265_PROFILE_MAIN_STILL = 4,
-};
-
-
-static bool convert_h265_profile(unsigned int p, enum mc_h265_profile *o)
-{
-	switch (p) {
-	case 1:
-		*o = MC_H265_PROFILE_MAIN;
-		return true;
-	default:
-		return false;
-	}
-}
-
-
-/* See
- * https://developer.android.com/reference/android/media/MediaCodecInfo.CodecProfileLevel
- * for reference. */
-enum mc_h265_level {
-	MC_H265_HIGH_TIER_LEVEL1 = 0x2,
-	MC_H265_HIGH_TIER_LEVEL2 = 0x8,
-	MC_H265_HIGH_TIER_LEVEL21 = 0x20,
-	MC_H265_HIGH_TIER_LEVEL3 = 0x80,
-	MC_H265_HIGH_TIER_LEVEL31 = 0x200,
-	MC_H265_HIGH_TIER_LEVEL4 = 0x800,
-	MC_H265_HIGH_TIER_LEVEL41 = 0x2000,
-	MC_H265_HIGH_TIER_LEVEL5 = 0x8000,
-	MC_H265_HIGH_TIER_LEVEL51 = 0x20000,
-	MC_H265_HIGH_TIER_LEVEL52 = 0x80000,
-	MC_H265_HIGH_TIER_LEVEL6 = 0x200000,
-	MC_H265_HIGH_TIER_LEVEL61 = 0x800000,
-	MC_H265_HIGH_TIER_LEVEL62 = 0x2000000,
-	MC_H265_MAIN_TIER_LEVEL1 = 0x1,
-	MC_H265_MAIN_TIER_LEVEL2 = 0x4,
-	MC_H265_MAIN_TIER_LEVEL21 = 0x10,
-	MC_H265_MAIN_TIER_LEVEL3 = 0x40,
-	MC_H265_MAIN_TIER_LEVEL31 = 0x100,
-	MC_H265_MAIN_TIER_LEVEL4 = 0x400,
-	MC_H265_MAIN_TIER_LEVEL41 = 0x1000,
-	MC_H265_MAIN_TIER_LEVEL5 = 0x4000,
-	MC_H265_MAIN_TIER_LEVEL51 = 0x10000,
-	MC_H265_MAIN_TIER_LEVEL52 = 0x40000,
-	MC_H265_MAIN_TIER_LEVEL6 = 0x100000,
-	MC_H265_MAIN_TIER_LEVEL61 = 0x400000,
-	MC_H265_MAIN_TIER_LEVEL62 = 0x1000000,
-};
-
-
-static bool convert_h265_level(unsigned int l, enum mc_h265_level *o)
-{
-	switch (l) {
-	case 40:
-		*o = MC_H265_MAIN_TIER_LEVEL4;
-		return true;
-
-	default:
-		return false;
-	}
 }
 
 
@@ -303,6 +89,28 @@ static int get_supported_input_formats(const struct vdef_raw_format **formats)
 			   initialize_supported_formats);
 	*formats = supported_formats;
 	return NB_SUPPORTED_FORMATS;
+}
+
+
+static void call_flush_done(void *userdata)
+{
+	struct venc_mediacodec *self = userdata;
+
+	VENC_LOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
+
+	if (self->base->cbs.flush)
+		self->base->cbs.flush(self->base, self->base->userdata);
+}
+
+
+static void call_stop_done(void *userdata)
+{
+	struct venc_mediacodec *self = userdata;
+
+	VENC_LOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
+
+	if (self->base->cbs.stop)
+		self->base->cbs.stop(self->base, self->base->userdata);
 }
 
 
@@ -365,135 +173,146 @@ static void store_ps(struct venc_mediacodec *self,
 		     size_t buf_idx,
 		     AMediaCodecBufferInfo info)
 {
+	int err;
+	size_t size = 0;
 	/* We’re not going to use the size returned by `getOutputBuffer`, but
 	 * it might not support being passed `NULL`. */
 	size_t discarded_size;
 	const uint8_t *p =
 		AMediaCodec_getOutputBuffer(self->mc, buf_idx, &discarded_size);
+	if (p == NULL) {
+		VENC_LOGE("AMediaCodec_getOutputBuffer");
+		goto out;
+	}
 
 	p += info.offset;
-	size_t size = info.size;
+	size = info.size;
 
 	pthread_mutex_lock(&self->pull.mutex);
 	switch (self->base->config.encoding) {
 	case VDEF_ENCODING_H264: {
+		/* Copy PS */
 		uint8_t **a[] = {
-			&self->pending.sps,
-			&self->pending.pps,
+			&self->base->h264.sps,
+			&self->base->h264.pps,
 		};
 		size_t *lens[] = {
-			&self->pending.sps_size,
-			&self->pending.pps_size,
+			&self->base->h264.sps_size,
+			&self->base->h264.pps_size,
 		};
 		copy_nalus(a, lens, 2, p, size);
 		/* Initialize the H.264 writer */
-		venc_h264_writer_new(self->pending.sps,
-				     self->pending.sps_size,
-				     self->pending.pps,
-				     self->pending.pps_size,
-				     &self->base->h264.ctx);
+		err = venc_h264_writer_new(self->base->h264.sps,
+					   self->base->h264.sps_size,
+					   self->base->h264.pps,
+					   self->base->h264.pps_size,
+					   &self->base->h264.ctx);
+		if (err < 0) {
+			VENC_LOG_ERRNO("venc_h264_writer_new", -err);
+			goto out;
+		}
+		err = venc_h264_patch_ps(self->base);
+		if (err < 0) {
+			VENC_LOG_ERRNO("venc_h264_patch_ps", -err);
+			goto out;
+		}
 		break;
 	}
-
 	case VDEF_ENCODING_H265: {
+		/* Copy PS */
 		uint8_t **a[] = {
-			&self->pending.vps,
-			&self->pending.sps,
-			&self->pending.pps,
+			&self->base->h265.vps,
+			&self->base->h265.sps,
+			&self->base->h265.pps,
 		};
 		size_t *lens[] = {
-			&self->pending.vps_size,
-			&self->pending.sps_size,
-			&self->pending.pps_size,
+			&self->base->h265.vps_size,
+			&self->base->h265.sps_size,
+			&self->base->h265.pps_size,
 		};
 		copy_nalus(a, lens, 3, p, size);
 		/* Initialize the H.265 writer */
-		venc_h265_writer_new(self->pending.vps,
-				     self->pending.vps_size,
-				     self->pending.sps,
-				     self->pending.sps_size,
-				     self->pending.pps,
-				     self->pending.pps_size,
-				     &self->base->h265.ctx);
+		err = venc_h265_writer_new(self->base->h265.vps,
+					   self->base->h265.vps_size,
+					   self->base->h265.sps,
+					   self->base->h265.sps_size,
+					   self->base->h265.pps,
+					   self->base->h265.pps_size,
+					   &self->base->h265.ctx);
+		if (err < 0) {
+			VENC_LOG_ERRNO("venc_h265_writer_new", -err);
+			goto out;
+		}
+		err = venc_h265_patch_ps(self->base);
+		if (err < 0) {
+			VENC_LOG_ERRNO("venc_h265_patch_ps", -err);
+			goto out;
+		}
 		break;
 	}
-
 	default:
 		break;
 	}
 	pthread_mutex_unlock(&self->pull.mutex);
 
-	pomp_evt_signal(self->out_evt);
+out:
+	err = pomp_evt_signal(self->out_evt);
+	if (err < 0)
+		VENC_LOG_ERRNO("pomp_evt_signal", -err);
 
 	media_status_t status =
 		AMediaCodec_releaseOutputBuffer(self->mc, buf_idx, false);
-	if (status != AMEDIA_OK)
-		ULOGE("AMediaCodec_releaseOutputBuffer");
+	if (status != AMEDIA_OK) {
+		VENC_LOGE("AMediaCodec_releaseOutputBuffer (%s:%d)",
+			  media_status_to_str(status),
+			  status);
+	}
 }
 
 
 static void on_output_event(struct pomp_evt *evt, void *userdata)
 {
+	int err;
 	struct venc_mediacodec *self = userdata;
 
-	switch (self->state) {
+	switch (atomic_load(&self->state)) {
 	case RUNNING:
-		pthread_mutex_lock(&self->pull.mutex);
-		switch (self->base->config.encoding) {
-		case VDEF_ENCODING_H264:
-			if (self->pending.sps != NULL) {
-				self->base->h264.sps = self->pending.sps;
-				self->base->h264.sps_size =
-					self->pending.sps_size;
-				self->pending.sps = NULL;
-			}
-			if (self->pending.pps != NULL) {
-				self->base->h264.pps = self->pending.pps;
-				self->base->h264.pps_size =
-					self->pending.pps_size;
-				self->pending.pps = NULL;
-			}
-			break;
-		case VDEF_ENCODING_H265:
-			if (self->pending.vps != NULL) {
-				self->base->h265.vps = self->pending.vps;
-				self->base->h265.vps_size =
-					self->pending.vps_size;
-				self->pending.vps = NULL;
-			}
-			if (self->pending.sps != NULL) {
-				self->base->h265.sps = self->pending.sps;
-				self->base->h265.sps_size =
-					self->pending.sps_size;
-				self->pending.sps = NULL;
-			}
-			if (self->pending.pps != NULL) {
-				self->base->h265.pps = self->pending.pps;
-				self->base->h265.pps_size =
-					self->pending.pps_size;
-				self->pending.pps = NULL;
-			}
-			break;
-		default:
-			break;
-		}
-		pthread_mutex_unlock(&self->pull.mutex);
-
-		while (true) {
-			struct mbuf_coded_video_frame *frame;
-			int res = mbuf_coded_video_frame_queue_pop(
-				self->out_queue, &frame);
-			if (res < 0) {
-				if (res != -EAGAIN)
-					ULOG_ERRNO(
-						"mbuf_coded_video_frame_queue_pop",
-						-res);
+		do {
+			struct mbuf_coded_video_frame *out_frame;
+			err = mbuf_coded_video_frame_queue_pop(self->out_queue,
+							       &out_frame);
+			if (err < 0) {
+				if (err != -EAGAIN)
+					VENC_LOG_ERRNO(
+						"mbuf_coded_video_"
+						"frame_queue_pop",
+						-err);
 				break;
 			}
-			self->base->cbs.frame_output(
-				self->base, 0, frame, self->base->userdata);
-			mbuf_coded_video_frame_unref(frame);
-		}
+			struct vdef_coded_frame out_info = {};
+			err = mbuf_coded_video_frame_get_frame_info(out_frame,
+								    &out_info);
+			if (err < 0)
+				VENC_LOG_ERRNO(
+					"mbuf_coded_video_frame_get_frame_info",
+					-err);
+			if (atomic_load(&self->state) != WAITING_FOR_FLUSH) {
+				self->base->cbs.frame_output(
+					self->base,
+					0,
+					out_frame,
+					self->base->userdata);
+				self->base->counters.out++;
+			} else {
+				VENC_LOGD("discarding frame %d",
+					  out_info.info.index);
+			}
+			err = mbuf_coded_video_frame_unref(out_frame);
+			if (err < 0) {
+				VENC_LOG_ERRNO("mbuf_coded_video_frame_unref",
+					       -err);
+			}
+		} while (err == 0);
 
 		pthread_mutex_lock(&self->pull.mutex);
 		bool eos_flag = self->eos_flag;
@@ -501,10 +320,18 @@ static void on_output_event(struct pomp_evt *evt, void *userdata)
 		pthread_mutex_unlock(&self->pull.mutex);
 
 		if (eos_flag) {
-			AMediaCodec_flush(self->mc);
-			if (self->base->cbs.flush)
-				self->base->cbs.flush(self->base,
-						      self->base->userdata);
+			media_status_t status = AMediaCodec_flush(self->mc);
+			if (status != AMEDIA_OK) {
+				VENC_LOGE("AMediaCodec_flush (%s:%d)",
+					  media_status_to_str(status),
+					  status);
+			}
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_flush_done, self, self);
+			if (err < 0) {
+				VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					       -err);
+			}
 		}
 		break;
 	case WAITING_FOR_FLUSH:
@@ -516,19 +343,46 @@ static void on_output_event(struct pomp_evt *evt, void *userdata)
 		pthread_mutex_unlock(&self->push.mutex);
 
 		if (flush_complete) {
-			self->state = RUNNING;
+			err = mbuf_raw_video_frame_queue_flush(self->in_queue);
+			if (err < 0) {
+				VENC_LOG_ERRNO(
+					"mbuf_raw_video_frame_queue_flush(in)",
+					-err);
+			}
+			err = mbuf_raw_video_frame_queue_flush(
+				self->meta_queue);
+			if (err < 0) {
+				VENC_LOG_ERRNO(
+					"mbuf_raw_video_frame"
+					"_queue_flush(meta)",
+					-err);
+			}
+			err = mbuf_coded_video_frame_queue_flush(
+				self->out_queue);
+			if (err < 0) {
+				VENC_LOG_ERRNO(
+					"mbuf_coded_video_frame"
+					"_queue_flush(out)",
+					-err);
+			}
 
-			mbuf_raw_video_frame_queue_flush(self->in_queue);
-			mbuf_raw_video_frame_queue_flush(self->meta_queue);
-			mbuf_coded_video_frame_queue_flush(self->out_queue);
-			AMediaCodec_flush(self->mc);
+			media_status_t status = AMediaCodec_flush(self->mc);
+			if (status != AMEDIA_OK) {
+				VENC_LOGE("AMediaCodec_flush (%s:%d)",
+					  media_status_to_str(status),
+					  status);
+			}
 
-			if (self->base->cbs.flush != NULL)
-				self->base->cbs.flush(self->base,
-						      self->base->userdata);
+			atomic_store(&self->state, RUNNING);
+
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_flush_done, self, self);
+			if (err < 0) {
+				VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					       -err);
+			}
 		}
 		break;
-
 	case WAITING_FOR_STOP:
 		pthread_mutex_lock(&self->push.mutex);
 		pthread_mutex_lock(&self->pull.mutex);
@@ -538,9 +392,19 @@ static void on_output_event(struct pomp_evt *evt, void *userdata)
 		pthread_mutex_unlock(&self->push.mutex);
 
 		if (stop_complete) {
-			if (self->base->cbs.stop != NULL)
-				self->base->cbs.stop(self->base,
-						     self->base->userdata);
+			media_status_t status = AMediaCodec_stop(self->mc);
+			if (status != AMEDIA_OK) {
+				VENC_LOGE("AMediaCodec_stop (%s:%d)",
+					  media_status_to_str(status),
+					  status);
+			}
+
+			err = pomp_loop_idle_add_with_cookie(
+				self->base->loop, call_stop_done, self, self);
+			if (err < 0) {
+				VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie",
+					       -err);
+			}
 		}
 		break;
 	default:
@@ -554,22 +418,25 @@ static int flush(struct venc_encoder *base, int discard)
 	struct venc_mediacodec *self = base->derived;
 
 	if (discard) {
+		int state = atomic_exchange(&self->state, WAITING_FOR_FLUSH);
+		if (state == WAITING_FOR_FLUSH)
+			return 0;
+
 		pthread_mutex_lock(&self->push.mutex);
 		self->push.flush_flag = true;
+		self->push.cond_signalled = true;
 		pthread_cond_signal(&self->push.cond);
 		pthread_mutex_unlock(&self->push.mutex);
 
 		pthread_mutex_lock(&self->pull.mutex);
 		self->pull.flush_flag = true;
+		self->pull.cond_signalled = true;
 		pthread_cond_signal(&self->pull.cond);
 		pthread_mutex_unlock(&self->pull.mutex);
-
-		AMediaCodec_flush(self->mc);
-
-		self->state = WAITING_FOR_FLUSH;
 	} else {
 		pthread_mutex_lock(&self->push.mutex);
 		self->push.eos_flag = true;
+		self->push.cond_signalled = true;
 		pthread_cond_signal(&self->push.cond);
 		pthread_mutex_unlock(&self->push.mutex);
 	}
@@ -582,19 +449,21 @@ static int stop(struct venc_encoder *base)
 {
 	struct venc_mediacodec *self = base->derived;
 
-	AMediaCodec_stop(self->mc);
+	int state = atomic_exchange(&self->state, WAITING_FOR_STOP);
+	if (state == WAITING_FOR_STOP)
+		return 0;
 
 	pthread_mutex_lock(&self->push.mutex);
 	self->push.stop_flag = true;
+	self->push.cond_signalled = true;
 	pthread_cond_signal(&self->push.cond);
 	pthread_mutex_unlock(&self->push.mutex);
 
 	pthread_mutex_lock(&self->pull.mutex);
 	self->pull.stop_flag = true;
+	self->pull.cond_signalled = true;
 	pthread_cond_signal(&self->pull.cond);
 	pthread_mutex_unlock(&self->pull.mutex);
-
-	self->state = WAITING_FOR_STOP;
 
 	return 0;
 }
@@ -603,23 +472,36 @@ static int stop(struct venc_encoder *base)
 static int destroy(struct venc_encoder *base)
 {
 	struct venc_mediacodec *self = base->derived;
+	int err;
 
 	if (self == NULL)
 		return 0;
 
-	free(self->pending.vps);
-	free(self->pending.sps);
-	free(self->pending.pps);
-
 	if (self->libmediandk_handle != NULL)
 		dlclose(self->libmediandk_handle);
 
-	if (self->mc != NULL)
-		AMediaCodec_stop(self->mc);
+	if (self->mc != NULL) {
+		media_status_t status = AMediaCodec_stop(self->mc);
+		if (status != AMEDIA_OK) {
+			VENC_LOGE("AMediaCodec_stop (%s:%d)",
+				  media_status_to_str(status),
+				  status);
+		}
+	}
+
+	if (self->mem != NULL) {
+		err = mbuf_mem_unref(self->mem);
+		if (err != 0)
+			VENC_LOG_ERRNO("mbuf_mem_unref", -err);
+	}
+
+	if (self->format != NULL)
+		AMediaFormat_delete(self->format);
 
 	if (self->pull.thread_created) {
 		pthread_mutex_lock(&self->pull.mutex);
 		self->pull.stop_flag = true;
+		self->pull.cond_signalled = true;
 		pthread_cond_signal(&self->pull.cond);
 		pthread_mutex_unlock(&self->pull.mutex);
 
@@ -629,34 +511,85 @@ static int destroy(struct venc_encoder *base)
 	if (self->push.thread_created) {
 		pthread_mutex_lock(&self->push.mutex);
 		self->push.stop_flag = true;
+		self->push.cond_signalled = true;
 		pthread_cond_signal(&self->push.cond);
 		pthread_mutex_unlock(&self->push.mutex);
 
 		pthread_join(self->push.thread, NULL);
 	}
 
+	/* Remove any leftover idle callbacks */
+	err = pomp_loop_idle_remove_by_cookie(self->base->loop, self);
+	if (err < 0)
+		VENC_LOG_ERRNO("pomp_loop_idle_remove_by_cookie", -err);
+
 	if (self->out_evt != NULL) {
-		if (pomp_evt_is_attached(self->out_evt, base->loop))
-			pomp_evt_detach_from_loop(self->out_evt, base->loop);
-		pomp_evt_destroy(self->out_evt);
+		if (pomp_evt_is_attached(self->out_evt, base->loop)) {
+			err = pomp_evt_detach_from_loop(self->out_evt,
+							base->loop);
+			if (err < 0)
+				VENC_LOG_ERRNO("pomp_evt_detach_from_loop",
+					       -err);
+		}
+		err = pomp_evt_destroy(self->out_evt);
+		if (err < 0)
+			VENC_LOG_ERRNO("pomp_evt_destroy", -err);
 	}
 
-	if (self->out_queue != NULL)
-		mbuf_coded_video_frame_queue_destroy(self->out_queue);
+	if (self->out_queue != NULL) {
+		err = mbuf_coded_video_frame_queue_destroy(self->out_queue);
+		if (err < 0)
+			VENC_LOG_ERRNO(
+				"mbuf_coded_video_frame_queue_destroy(out)",
+				-err);
+	}
 
-	if (self->meta_queue != NULL)
-		mbuf_raw_video_frame_queue_destroy(self->meta_queue);
+	if (self->meta_queue != NULL) {
+		err = mbuf_raw_video_frame_queue_destroy(self->meta_queue);
+		if (err < 0)
+			VENC_LOG_ERRNO(
+				"mbuf_raw_video_frame_queue_destroy(meta)",
+				-err);
+	}
 
 	if (self->in_queue != NULL) {
 		struct pomp_evt *evt;
-		mbuf_raw_video_frame_queue_get_event(self->in_queue, &evt);
-		if (pomp_evt_is_attached(evt, base->loop))
-			pomp_evt_detach_from_loop(evt, base->loop);
-		mbuf_raw_video_frame_queue_destroy(self->in_queue);
+		err = mbuf_raw_video_frame_queue_get_event(self->in_queue,
+							   &evt);
+		if (err < 0) {
+			VENC_LOG_ERRNO(
+				"mbuf_raw_video_frame_queue_get_event(in)",
+				-err);
+		}
+		if (pomp_evt_is_attached(evt, base->loop)) {
+			err = pomp_evt_detach_from_loop(evt, base->loop);
+			if (err < 0)
+				VENC_LOG_ERRNO("pomp_evt_detach_from_loop",
+					       -err);
+		}
+		err = mbuf_raw_video_frame_queue_destroy(self->in_queue);
+		if (err < 0) {
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_destroy(in)",
+				       -err);
+		}
 	}
 
-	if (self->mc != NULL)
-		AMediaCodec_delete(self->mc);
+	if (self->enc_name != NULL) {
+		AMediaCodec_releaseName(self->mc, self->enc_name);
+		self->enc_name = NULL;
+	}
+
+	if (self->mc != NULL) {
+		media_status_t status = AMediaCodec_delete(self->mc);
+		if (status != AMEDIA_OK) {
+			VENC_LOGE("AMediaCodec_delete (%s:%d)",
+				  media_status_to_str(status),
+				  status);
+		}
+	}
+
+	if (self->surface != NULL)
+		ANativeWindow_release(self->surface);
 
 	pthread_mutex_destroy(&self->push.mutex);
 	pthread_cond_destroy(&self->push.cond);
@@ -665,158 +598,353 @@ static int destroy(struct venc_encoder *base)
 	pthread_cond_destroy(&self->pull.cond);
 
 	free(self);
+	base->derived = NULL;
 
 	return 0;
 }
 
 
-static void push_eos(struct venc_mediacodec *self)
+static int push_eos(struct venc_mediacodec *self)
 {
-	ssize_t dec_buf_idx = AMediaCodec_dequeueInputBuffer(self->mc, -1);
-	if (dec_buf_idx < 0) {
-		ULOGE("AMediaCodec_dequeueInputBuffer");
-		return;
+	ssize_t buf_idx;
+	ssize_t status;
+	media_status_t _status;
+
+	if (self->surface != NULL) {
+		_status = AMediaCodec_signalEndOfInputStream(self->mc);
+		if (_status != AMEDIA_OK) {
+			VENC_LOGE("AMediaCodec_signalEndOfInputStream (%s:%d)",
+				  media_status_to_str(_status),
+				  _status);
+			return -EPROTO;
+		}
+		goto out;
 	}
 
-	media_status_t status = AMediaCodec_queueInputBuffer(
+	status = AMediaCodec_dequeueInputBuffer(self->mc,
+						INPUT_DEQUEUE_TIMEOUT_US);
+	if (status == AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
+		return -EAGAIN;
+	} else if (status < 0) {
+		VENC_LOGE(
+			"AMediaCodec"
+			"_dequeueInputBuffer (%s:%d)",
+			media_status_to_str((media_status_t)status),
+			(media_status_t)status);
+		return -EPROTO;
+	}
+	buf_idx = status;
+
+	_status = AMediaCodec_queueInputBuffer(
 		self->mc,
-		dec_buf_idx,
+		buf_idx,
 		0,
 		0,
 		0,
 		AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
-	if (status != AMEDIA_OK)
-		ULOGE("AMediaCodec_queueInputBuffer");
+	if (_status != AMEDIA_OK) {
+		VENC_LOGE("AMediaCodec_queueInputBuffer (%s:%d)",
+			  media_status_to_str(_status),
+			  _status);
+		return -EPROTO;
+	}
 
+out:
 	pthread_mutex_lock(&self->pull.mutex);
 	self->pull.eos_flag = true;
+	self->pull.cond_signalled = true;
 	pthread_cond_signal(&self->pull.cond);
 	pthread_mutex_unlock(&self->pull.mutex);
+
+	return 0;
 }
 
 
-static void push_frame(struct venc_mediacodec *self,
-		       struct mbuf_raw_video_frame *frame)
+static int push_frame(struct venc_mediacodec *self,
+		      struct mbuf_raw_video_frame *frame)
 {
+	int err;
+	int res;
 	struct vdef_raw_frame frame_info;
-	mbuf_raw_video_frame_get_frame_info(frame, &frame_info);
+	media_status_t status;
+	ssize_t _status;
+	ssize_t buf_idx = -1;
+	size_t buf_size;
+	size_t required_len = 0;
+	uint8_t *buf_data;
+	size_t nplanes = 0;
+	const void *planes[VDEF_RAW_MAX_PLANE_COUNT] = {};
+	size_t plane_lens[VDEF_RAW_MAX_PLANE_COUNT] = {};
+	struct timespec cur_ts = {0, 0};
+	uint64_t ts_us;
+	struct mbuf_raw_video_frame *meta_frame = NULL;
 
-	size_t nplanes = vdef_get_raw_frame_plane_count(&frame_info.format);
-	const void *planes[VDEF_RAW_MAX_PLANE_COUNT];
-	size_t plane_lens[VDEF_RAW_MAX_PLANE_COUNT];
+	res = mbuf_raw_video_frame_get_frame_info(frame, &frame_info);
+	if (res < 0) {
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_frame_info", -res);
+		goto end;
+	}
+
+	ts_us = VDEF_ROUND(frame_info.info.timestamp * 1000000,
+			   frame_info.info.timescale);
+
+	if (self->surface != NULL) {
+		if (!vdef_raw_format_cmp(&frame_info.format, &vdef_opaque)) {
+			res = -EPROTO;
+			ULOGE("%s: expecting opaque format "
+			      "for encoding from a surface",
+			      __func__);
+			goto end;
+		}
+		goto no_buffer;
+	}
+
+	nplanes = vdef_get_raw_frame_plane_count(&frame_info.format);
+	if (nplanes == 0) {
+		res = -EPROTO;
+		VENC_LOGE("vdef_get_raw_frame_plane_count");
+		goto end;
+	}
 
 	for (size_t i = 0; i < nplanes; i++) {
 		int res = mbuf_raw_video_frame_get_plane(
 			frame, i, planes + i, plane_lens + i);
 		if (res < 0) {
-			for (size_t j = 0; j < i; j++)
-				mbuf_raw_video_frame_release_plane(
-					frame, j, planes[j]);
-			mbuf_raw_video_frame_unref(frame);
-			return;
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_get_plane", -res);
+			goto end;
 		}
 	}
 
-	ssize_t buf_idx = AMediaCodec_dequeueInputBuffer(self->mc, -1);
-	if (buf_idx < 0) {
-		ULOGE("AMediaCodec_dequeueInputBuffer");
-		for (size_t i = 0; i < nplanes; i++)
-			mbuf_raw_video_frame_release_plane(frame, i, planes[i]);
-		mbuf_raw_video_frame_unref(frame);
-		return;
+	_status = AMediaCodec_dequeueInputBuffer(self->mc,
+						 INPUT_DEQUEUE_TIMEOUT_US);
+	if (_status == AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
+		res = -EAGAIN;
+		goto end;
+	} else if (_status < 0) {
+		VENC_LOGE(
+			"AMediaCodec"
+			"_dequeueInputBuffer (%s:%d)",
+			media_status_to_str((media_status_t)_status),
+			(media_status_t)_status);
+		res = -EPROTO;
+		goto end;
+	}
+	buf_idx = _status;
+
+	buf_data = AMediaCodec_getInputBuffer(self->mc, buf_idx, &buf_size);
+	if (buf_data == NULL) {
+		VENC_LOGE("AMediaCodec_getInputBuffer");
+		res = -EPROTO;
+		goto end;
 	}
 
-	size_t buf_size;
-	uint8_t *buf_data =
-		AMediaCodec_getInputBuffer(self->mc, buf_idx, &buf_size);
-
-	size_t required_len = 0;
 	for (size_t i = 0; i < nplanes; i++)
 		required_len += plane_lens[i];
 
 	if (buf_size < required_len) {
-		ULOGE("buf_size < required_len");
-		for (size_t i = 0; i < nplanes; i++)
-			mbuf_raw_video_frame_release_plane(frame, i, planes[i]);
-		mbuf_raw_video_frame_unref(frame);
-		AMediaCodec_queueInputBuffer(self->mc, buf_idx, 0, 0, 0, 0);
-		return;
+		VENC_LOGE("buf_size (%zu) < required_len (%zu)",
+			  buf_size,
+			  required_len);
+		res = -ENOBUFS;
+		goto end;
 	}
 
 	/**
-	 * TODO: provide AMediaCodec buffers in our own input pool to avoid
-	 * copies
+	 * TODO: provide AMediaCodec buffers in our own input pool to
+	 * avoid copies
 	 */
 	for (size_t i = 0; i < nplanes; i++) {
 		memcpy(buf_data, planes[i], plane_lens[i]);
 		buf_data += plane_lens[i];
 	}
 
-	for (size_t i = 0; i < nplanes; i++)
-		mbuf_raw_video_frame_release_plane(frame, i, planes[i]);
-
-	uint64_t ts_us = VDEF_ROUND(frame_info.info.timestamp * 1000000,
-				    frame_info.info.timescale);
-
-	media_status_t status = AMediaCodec_queueInputBuffer(
+	status = AMediaCodec_queueInputBuffer(
 		self->mc, buf_idx, 0, required_len, ts_us, 0);
-	if (status != AMEDIA_OK)
-		ULOGE("AMediaCodec_queueInputBuffer");
+	if (status != AMEDIA_OK) {
+		VENC_LOGE("AMediaCodec_queueInputBuffer (%s:%d)",
+			  media_status_to_str(status),
+			  status);
+		res = -EPROTO;
+		goto end;
+	}
+	buf_idx = -1;
 
-	mbuf_raw_video_frame_queue_push(self->meta_queue, frame);
-	mbuf_raw_video_frame_unref(frame);
+no_buffer:
+	time_get_monotonic(&cur_ts);
+	time_timespec_to_us(&cur_ts, &ts_us);
 
-	pthread_mutex_lock(&self->pull.mutex);
-	pthread_cond_signal(&self->pull.cond);
-	pthread_mutex_unlock(&self->pull.mutex);
+	err = mbuf_raw_video_frame_add_ancillary_buffer(
+		frame, VENC_ANCILLARY_KEY_DEQUEUE_TIME, &ts_us, sizeof(ts_us));
+	if (err < 0)
+		VENC_LOGW_ERRNO("mbuf_raw_video_frame_add_ancillary_buffer",
+				-err);
+
+	res = venc_copy_raw_frame_as_metadata(frame, self->mem, &meta_frame);
+	if (res < 0) {
+		VENC_LOG_ERRNO("venc_copy_raw_frame_as_metadata", -res);
+		goto end;
+	}
+
+	err = mbuf_raw_video_frame_queue_push(self->meta_queue, meta_frame);
+	if (err != 0) {
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_push", -err);
+		goto end;
+	}
+
+	/* Don't wake-up pull routine when flushing or stopping */
+	if (atomic_load(&self->state) == RUNNING) {
+		pthread_mutex_lock(&self->pull.mutex);
+		self->pull.cond_signalled = true;
+		pthread_cond_signal(&self->pull.cond);
+		pthread_mutex_unlock(&self->pull.mutex);
+	}
+
+	res = 0;
+
+end:
+	if (buf_idx >= 0) {
+		status = AMediaCodec_queueInputBuffer(
+			self->mc, buf_idx, 0, 0, 0, 0);
+		if (status != AMEDIA_OK) {
+			VENC_LOGE("AMediaCodec_queueInputBuffer (%s:%d)",
+				  media_status_to_str(status),
+				  status);
+		}
+	}
+	if (meta_frame) {
+		err = mbuf_raw_video_frame_unref(meta_frame);
+		if (err < 0)
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_unref", -err);
+	}
+	if (frame) {
+		for (size_t i = 0; i < nplanes; i++) {
+			if (planes[i] != NULL) {
+				err = mbuf_raw_video_frame_release_plane(
+					frame, i, planes[i]);
+				if (err < 0)
+					VENC_LOG_ERRNO(
+						"mbuf_raw_video_frame"
+						"_release_plane",
+						-err);
+			}
+		}
+		err = mbuf_raw_video_frame_unref(frame);
+		if (err < 0)
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_unref", -err);
+	}
+	return res;
+}
+
+
+static void on_input_event(struct pomp_evt *evt, void *userdata)
+{
+	struct venc_mediacodec *self = userdata;
+
+	/* Don't wake-up push routine when flushing or stopping */
+	if (atomic_load(&self->state) != RUNNING)
+		return;
+
+	pthread_mutex_lock(&self->push.mutex);
+	self->push.cond_signalled = true;
+	pthread_cond_signal(&self->push.cond);
+	pthread_mutex_unlock(&self->push.mutex);
 }
 
 
 static void *push_routine(void *ptr)
 {
+	int err;
 	struct venc_mediacodec *self = ptr;
 	unsigned int decimation_counter = 0;
 
+	err = pthread_setname_np(pthread_self(), "venc_mdcdc_push");
+	if (err != 0)
+		ULOG_ERRNO("pthread_setname_np", err);
+
 	pthread_mutex_lock(&self->push.mutex);
 	while (true) {
+		self->push.cond_signalled = false;
 		if (self->push.stop_flag) {
 			self->push.stop_flag = false;
-			pomp_evt_signal(self->out_evt);
+			err = pomp_evt_signal(self->out_evt);
+			if (err < 0)
+				VENC_LOG_ERRNO("pomp_evt_signal", -err);
 			pthread_mutex_unlock(&self->push.mutex);
 			break;
 		}
 
 		if (self->push.flush_flag) {
 			self->push.flush_flag = false;
-			pomp_evt_signal(self->out_evt);
-			pthread_cond_wait(&self->push.cond, &self->push.mutex);
-			continue;
+			err = pomp_evt_signal(self->out_evt);
+			if (err < 0)
+				VENC_LOG_ERRNO("pomp_evt_signal", -err);
+			goto wait;
 		}
 
 		struct mbuf_raw_video_frame *frame;
 		int res =
-			mbuf_raw_video_frame_queue_pop(self->in_queue, &frame);
+			mbuf_raw_video_frame_queue_peek(self->in_queue, &frame);
 		if (res == 0) {
+			pthread_mutex_unlock(&self->push.mutex);
 			if (decimation_counter == 0) {
-				pthread_mutex_unlock(&self->push.mutex);
-				push_frame(self, frame);
+				/* Note: push_frame unrefs the frame */
+				err = push_frame(self, frame);
+				if (err == -EAGAIN) {
+					/* Retry later */
+					pthread_mutex_lock(&self->push.mutex);
+					goto wait;
+				} else if (err != 0) {
+					ULOG_ERRNO("push_frame", -err);
+				}
+			} else {
+				/* Skip frame */
+				err = mbuf_raw_video_frame_unref(frame);
+				if (err < 0) {
+					VENC_LOG_ERRNO(
+						"mbuf_raw_video_frame_unref",
+						-err);
+				}
+				err = 0;
+			}
+			if (err == 0)
+				self->base->counters.pushed++;
+			/* Pop the frame for real */
+			res = mbuf_raw_video_frame_queue_pop(self->in_queue,
+							     &frame);
+			if (res < 0) {
+				VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_pop",
+					       -res);
 				pthread_mutex_lock(&self->push.mutex);
+				continue;
+			}
+			err = mbuf_raw_video_frame_unref(frame);
+			if (err < 0) {
+				VENC_LOG_ERRNO("mbuf_raw_video_frame_unref",
+					       -err);
 			}
 			decimation_counter += 1;
 			if (decimation_counter >= self->dynconf.decimation)
 				decimation_counter = 0;
+			pthread_mutex_lock(&self->push.mutex);
 			continue;
 		} else if (res == -EAGAIN && self->push.eos_flag) {
-			self->push.eos_flag = false;
 			pthread_mutex_unlock(&self->push.mutex);
-			push_eos(self);
+			int err = push_eos(self);
+			if (err == 0)
+				self->push.eos_flag = false;
+			else if (err < 0 && err != -EAGAIN)
+				VENC_LOG_ERRNO("push_eos", -err);
 			pthread_mutex_lock(&self->push.mutex);
 			continue;
 		} else if (res != -EAGAIN) {
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_pop", -res);
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_peek", -res);
 		}
 
-		pthread_cond_wait(&self->push.cond, &self->push.mutex);
+		/* clang-format off */
+wait:
+		/* clang-format on */
+		while (!self->push.cond_signalled)
+			pthread_cond_wait(&self->push.cond, &self->push.mutex);
 	}
 
 	return NULL;
@@ -828,15 +956,29 @@ static void release_mc_mem(void *data, size_t len, void *userdata)
 	size_t idx = len;
 	AMediaCodec *mc = userdata;
 
-	AMediaCodec_releaseOutputBuffer(mc, idx, false);
+	media_status_t status = AMediaCodec_releaseOutputBuffer(mc, idx, false);
+	if (status != AMEDIA_OK) {
+		ULOGE("AMediaCodec_releaseOutputBuffer (%s:%d)",
+		      media_status_to_str(status),
+		      status);
+	}
 }
 
 
-static void pull_frame(struct venc_mediacodec *self,
-		       struct mbuf_raw_video_frame *meta_frame)
+static int pull_frame(struct venc_mediacodec *self,
+		      struct mbuf_raw_video_frame *meta_frame)
 {
+	int res, err;
 	AMediaCodecBufferInfo info;
-	ssize_t buffer_index;
+	size_t buffer_index = SIZE_MAX;
+	struct mbuf_mem *out_mem = NULL;
+	struct mbuf_coded_video_frame *frame = NULL;
+	struct mbuf_coded_video_frame *out_frame = NULL;
+	uint8_t *out_data = NULL;
+	size_t out_size;
+	struct mbuf_mem *mem = NULL;
+	struct vdef_raw_frame meta_info = {};
+	struct vmeta_frame *metadata = NULL;
 
 	struct mbuf_coded_video_frame_cbs frame_cbs = {
 		.pre_release = self->base->cbs.pre_release,
@@ -844,67 +986,115 @@ static void pull_frame(struct venc_mediacodec *self,
 	};
 
 	while (true) {
-		buffer_index =
-			AMediaCodec_dequeueOutputBuffer(self->mc, &info, -1);
-
-		if (buffer_index == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
+		ssize_t status = AMediaCodec_dequeueOutputBuffer(
+			self->mc, &info, OUTPUT_DEQUEUE_TIMEOUT_US);
+		switch (status) {
+		case AMEDIACODEC_INFO_TRY_AGAIN_LATER:
+			res = -EAGAIN;
+			goto end;
+		case AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED:
 			/* MediaCodec sends both `FORMAT_CHANGED` events and
 			 * codec-config buffers. We use only the latter. */
 			continue;
+		default:
+			if (status < 0) {
+				VENC_LOGE(
+					"AMediaCodec"
+					"_dequeueOutputBuffer (%s:%d)",
+					media_status_to_str(
+						(media_status_t)status),
+					(media_status_t)status);
+				res = -EPROTO;
+				goto end;
+			}
+			buffer_index = status;
+			/* Buffers marked with
+			 * `AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG` contain only
+			 * parameter sets. */
+			if (info.flags & AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG) {
+				/* Note: store_ps releases the buffer */
+				store_ps(self, buffer_index, info);
+				buffer_index = SIZE_MAX;
+				continue;
+			}
+			goto end_loop;
 		}
-
-		if (buffer_index < 0) {
-			/* We assume that we got woken up by the input routine
-			 * calling `stop` or `flush` */
-			mbuf_raw_video_frame_unref(meta_frame);
-			return;
-		}
-
-		/* Buffers marked with `AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG`
-		 * contain only parameter sets. */
-		if (info.flags & AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG)
-			store_ps(self, buffer_index, info);
-		else
-			break;
 	}
 
-	size_t out_size;
-	uint8_t *out_data =
+end_loop:
+	out_data =
 		AMediaCodec_getOutputBuffer(self->mc, buffer_index, &out_size) +
 		info.offset;
-
-	struct mbuf_mem *mem;
-	/* buffer index is passed as argument instead of out_data buffer's
-	 * length */
-	int res = mbuf_mem_generic_wrap(
-		out_data, buffer_index, release_mc_mem, self->mc, &mem);
-	if (res < 0) {
-		AMediaCodec_releaseOutputBuffer(self->mc, buffer_index, false);
-		mbuf_raw_video_frame_unref(meta_frame);
-		return;
+	if (out_data == NULL) {
+		res = -EPROTO;
+		VENC_LOGE("AMediaCodec_getOutputBuffer");
+		goto end;
 	}
 
-	struct vdef_raw_frame meta_info;
-	mbuf_raw_video_frame_get_frame_info(meta_frame, &meta_info);
+	self->base->counters.pulled++;
+
+	/* buffer index is passed as argument instead of out_data buffer's
+	 * length */
+	res = mbuf_mem_generic_wrap(
+		out_data, buffer_index, release_mc_mem, self->mc, &mem);
+	if (res < 0) {
+		VENC_LOG_ERRNO("mbuf_mem_generic_wrap", -res);
+		goto end;
+	}
+
+	err = mbuf_raw_video_frame_get_frame_info(meta_frame, &meta_info);
+	if (err < 0)
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_frame_info", -err);
 
 	struct vdef_coded_frame out_info = {
 		.info = meta_info.info,
 		.type = VDEF_CODED_FRAME_TYPE_UNKNOWN,
-		.format = (self->base->config.encoding == VDEF_ENCODING_H264)
-				  ? vdef_h264_byte_stream
-				  : vdef_h265_byte_stream,
+		.layer = 0,
 	};
+	switch (self->base->config.encoding) {
+	default:
+	case VDEF_ENCODING_H264:
+		switch (self->base->config.output.preferred_format) {
+		case VDEF_CODED_DATA_FORMAT_BYTE_STREAM:
+		default:
+			out_info.format = vdef_h264_byte_stream;
+			break;
+		case VDEF_CODED_DATA_FORMAT_AVCC:
+			out_info.format = vdef_h264_avcc;
+			break;
+		case VDEF_CODED_DATA_FORMAT_RAW_NALU:
+			out_info.format = vdef_h264_raw_nalu;
+			break;
+		}
+		break;
+	case VDEF_ENCODING_H265:
+		switch (self->base->config.output.preferred_format) {
+		case VDEF_CODED_DATA_FORMAT_BYTE_STREAM:
+		default:
+			out_info.format = vdef_h265_byte_stream;
+			break;
+		case VDEF_CODED_DATA_FORMAT_HVCC:
+			out_info.format = vdef_h265_hvcc;
+			break;
+		case VDEF_CODED_DATA_FORMAT_RAW_NALU:
+			out_info.format = vdef_h265_raw_nalu;
+			break;
+		}
+		break;
+	}
 
 	uint8_t start_code[] = {0, 0, 0, 1};
-	const uint8_t *p = out_data;
+	uint8_t *p = out_data;
 	size_t n = info.size;
 	while (true) {
-		const uint8_t *q = p + 1;
+		uint8_t *q = p + 1;
 		size_t m = n - 1;
 
 		bool end;
 		while (true) {
 			if (m < sizeof(start_code)) {
+				q += m;
+				m = 0;
 				end = true;
 				break;
 			}
@@ -945,84 +1135,68 @@ static void pull_frame(struct venc_mediacodec *self,
 		n = m;
 	}
 
-	struct mbuf_coded_video_frame *out_frame;
-	res = mbuf_coded_video_frame_new(&out_info, &out_frame);
+	res = mbuf_coded_video_frame_new(&out_info, &frame);
 	if (res < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_few", -res);
-		mbuf_raw_video_frame_unref(meta_frame);
-		mbuf_mem_unref(mem);
-		return;
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_few", -res);
+		goto end;
 	}
-	res = mbuf_coded_video_frame_set_callbacks(out_frame, &frame_cbs);
+	res = mbuf_coded_video_frame_set_callbacks(frame, &frame_cbs);
 	if (res < 0)
-		ULOG_ERRNO("mbuf_coded_video_frame_set_callbacks", -res);
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_set_callbacks", -res);
 
 	res = mbuf_raw_video_frame_foreach_ancillary_data(
 		meta_frame,
 		mbuf_coded_video_frame_ancillary_data_copier,
-		out_frame);
+		frame);
 	if (res < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_foreach_ancillary_data", -res);
-		mbuf_raw_video_frame_unref(meta_frame);
-		mbuf_mem_unref(mem);
-		mbuf_coded_video_frame_unref(out_frame);
-		return;
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_foreach_ancillary_data",
+			       -res);
+		goto end;
 	}
 
-	struct vmeta_frame *metadata;
 	res = mbuf_raw_video_frame_get_metadata(meta_frame, &metadata);
-	mbuf_raw_video_frame_unref(meta_frame);
-	if (res < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_get_metadata", -res);
-		mbuf_mem_unref(mem);
-		mbuf_coded_video_frame_unref(out_frame);
-		return;
-	}
-
-	if (metadata != NULL) {
-		res = mbuf_coded_video_frame_set_metadata(out_frame, metadata);
-		vmeta_frame_unref(metadata);
+	if (res == 0) {
+		res = mbuf_coded_video_frame_set_metadata(frame, metadata);
 		if (res < 0) {
-			ULOG_ERRNO("mbuf_coded_video_frame_set_metadata", -res);
-			mbuf_mem_unref(mem);
-			mbuf_coded_video_frame_unref(out_frame);
-			return;
+			VENC_LOG_ERRNO("mbuf_coded_video_frame_set_metadata",
+				       -res);
+			goto end;
 		}
+	} else if (res == -ENOENT) {
+		res = 0;
+	} else {
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_metadata", -res);
+		goto end;
 	}
 
 	if (self->base->config.encoding == VDEF_ENCODING_H264) {
 		/* Add generated NAL units */
-		/* TODO: Set SPS and PPS in base before first frame */
-		res = venc_h264_generate_nalus(
-			self->base, out_frame, &out_info);
+		res = venc_h264_generate_nalus(self->base, frame, &out_info);
 		if (res < 0) {
-			ULOG_ERRNO("venc_h264_generate_nalus", -res);
-			mbuf_mem_unref(mem);
-			mbuf_coded_video_frame_unref(out_frame);
-			return;
+			VENC_LOG_ERRNO("venc_h264_generate_nalus", -res);
+			goto end;
 		}
 	} else if (self->base->config.encoding == VDEF_ENCODING_H265) {
 		/* Add generated NAL units */
-		/* TODO: Set VPS, SPS and PPS in base before first frame */
-		res = venc_h265_generate_nalus(
-			self->base, out_frame, &out_info);
+		res = venc_h265_generate_nalus(self->base, frame, &out_info);
 		if (res < 0) {
-			ULOG_ERRNO("venc_h265_generate_nalus", -res);
-			mbuf_mem_unref(mem);
-			mbuf_coded_video_frame_unref(out_frame);
-			return;
+			VENC_LOG_ERRNO("venc_h265_generate_nalus", -res);
+			goto end;
 		}
 	}
 
 	p = out_data;
 	n = info.size;
 	while (true) {
-		const uint8_t *q = p + 1;
+		uint8_t *q = p + 1;
 		size_t m = n - 1;
+		uint32_t nalu_size;
 
 		bool end;
 		while (true) {
 			if (m < sizeof(start_code)) {
+				q += m;
+				m = 0;
 				end = true;
 				break;
 			}
@@ -1034,6 +1208,20 @@ static void pull_frame(struct venc_mediacodec *self,
 
 			q += 1;
 			m -= 1;
+		}
+
+		switch (self->base->config.output.preferred_format) {
+		case VDEF_CODED_DATA_FORMAT_BYTE_STREAM:
+		default:
+			break;
+		case VDEF_CODED_DATA_FORMAT_AVCC:
+			/* Note: VDEF_CODED_DATA_FORMAT_HVCC is handled here */
+			nalu_size = htonl((q - p) - 4);
+			memcpy(p, &nalu_size, 4);
+			break;
+		case VDEF_CODED_DATA_FORMAT_RAW_NALU:
+			p += 4;
+			break;
 		}
 
 		struct vdef_nalu nalu = {
@@ -1067,12 +1255,12 @@ static void pull_frame(struct venc_mediacodec *self,
 		default:
 			break;
 		}
+
 		res = mbuf_coded_video_frame_add_nalu(
-			out_frame, mem, p - out_data, &nalu);
+			frame, mem, p - out_data, &nalu);
 		if (res < 0) {
-			mbuf_mem_unref(mem);
-			mbuf_coded_video_frame_unref(out_frame);
-			return;
+			VENC_LOG_ERRNO("mbuf_coded_video_frame_add_nalu", -res);
+			goto end;
 		}
 
 		if (end)
@@ -1082,77 +1270,179 @@ static void pull_frame(struct venc_mediacodec *self,
 		n = m;
 	}
 
-	mbuf_mem_unref(mem);
-
 	struct timespec cur_ts;
 	time_get_monotonic(&cur_ts);
 	uint64_t ts_us;
 	time_timespec_to_us(&cur_ts, &ts_us);
 
-	res = mbuf_coded_video_frame_add_ancillary_buffer(
-		out_frame,
-		VENC_ANCILLARY_KEY_OUTPUT_TIME,
-		&ts_us,
-		sizeof(ts_us));
-	if (res < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_add_ancillary_buffer", -res);
-		mbuf_coded_video_frame_unref(out_frame);
-		return;
+	err = mbuf_coded_video_frame_add_ancillary_buffer(
+		frame, VENC_ANCILLARY_KEY_OUTPUT_TIME, &ts_us, sizeof(ts_us));
+	if (err < 0) {
+		VENC_LOGW_ERRNO("mbuf_coded_video_frame_add_ancillary_buffer",
+				-err);
 	}
 
+	res = mbuf_coded_video_frame_finalize(frame);
+	if (res < 0) {
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_finalize", -res);
+		goto end;
+	}
+
+	ssize_t capacity = 0;
+	capacity = mbuf_coded_video_frame_get_packed_size(frame);
+	if (capacity < 0) {
+		res = -EPROTO;
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_get_packed_size", -res);
+		goto end;
+	}
+
+	res = mbuf_mem_generic_new(capacity, &out_mem);
+	if (res < 0) {
+		VENC_LOG_ERRNO("mbuf_mem_generic_new", -res);
+		goto end;
+	}
+
+	res = mbuf_coded_video_frame_copy(frame, out_mem, &out_frame);
+	if (res < 0) {
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_copy", -res);
+		goto end;
+	}
 	res = mbuf_coded_video_frame_finalize(out_frame);
 	if (res < 0) {
-		ULOG_ERRNO("mbuf_coded_video_frame_finalize", -res);
-		mbuf_coded_video_frame_unref(out_frame);
-		return;
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_finalize", -res);
+		goto end;
+	}
+	res = mbuf_coded_video_frame_queue_push(self->out_queue, out_frame);
+	if (res < 0) {
+		VENC_LOG_ERRNO("mbuf_coded_video_frame_queue_push", -res);
+		goto end;
 	}
 
-	res = mbuf_coded_video_frame_queue_push(self->out_queue, out_frame);
-	mbuf_coded_video_frame_unref(out_frame);
-	if (res < 0)
-		ULOG_ERRNO("mbuf_coded_video_frame_queue_push", -res);
+	err = pomp_evt_signal(self->out_evt);
+	if (err < 0)
+		VENC_LOG_ERRNO("pomp_evt_signal", -err);
 
-	pomp_evt_signal(self->out_evt);
+	res = 0;
+
+end:
+	if (metadata) {
+		err = vmeta_frame_unref(metadata);
+		if (err < 0)
+			VENC_LOG_ERRNO("vmeta_frame_unref", err);
+	}
+	if (mem) {
+		err = mbuf_mem_unref(mem);
+		if (err < 0)
+			VENC_LOG_ERRNO("mbuf_mem_unref", err);
+	} else if (buffer_index != SIZE_MAX) {
+		/* Buffer wasn't wrapped yet */
+		media_status_t status = AMediaCodec_releaseOutputBuffer(
+			self->mc, buffer_index, false);
+		if (status != AMEDIA_OK) {
+			VENC_LOGE("AMediaCodec_releaseOutputBuffer (%s:%d)",
+				  media_status_to_str(status),
+				  status);
+		}
+	}
+	if (frame) {
+		err = mbuf_coded_video_frame_unref(frame);
+		if (err < 0)
+			VENC_LOG_ERRNO("mbuf_coded_video_frame_unref", err);
+	}
+	if (out_mem) {
+		err = mbuf_mem_unref(out_mem);
+		if (err < 0)
+			VENC_LOG_ERRNO("mbuf_mem_unref", err);
+	}
+	if (out_frame) {
+		err = mbuf_coded_video_frame_unref(out_frame);
+		if (err < 0)
+			VENC_LOG_ERRNO("mbuf_coded_video_frame_unref", err);
+	}
+	if (meta_frame) {
+		err = mbuf_raw_video_frame_unref(meta_frame);
+		if (err < 0)
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_unref", err);
+	}
+
+	return res;
 }
 
 
 static void *pull_routine(void *ptr)
 {
+	int err;
 	struct venc_mediacodec *self = ptr;
+
+	err = pthread_setname_np(pthread_self(), "venc_mdcdc_pull");
+	if (err != 0)
+		ULOG_ERRNO("pthread_setname_np", err);
 
 	pthread_mutex_lock(&self->pull.mutex);
 	while (true) {
+		self->pull.cond_signalled = false;
 		if (self->pull.stop_flag) {
 			self->pull.stop_flag = false;
-			pomp_evt_signal(self->out_evt);
+			err = pomp_evt_signal(self->out_evt);
+			if (err < 0)
+				VENC_LOG_ERRNO("pomp_evt_signal", -err);
 			pthread_mutex_unlock(&self->pull.mutex);
 			break;
 		}
 
 		if (self->pull.flush_flag) {
 			self->pull.flush_flag = false;
-			pomp_evt_signal(self->out_evt);
-			pthread_cond_wait(&self->pull.cond, &self->pull.mutex);
-			continue;
+			err = pomp_evt_signal(self->out_evt);
+			if (err < 0)
+				VENC_LOG_ERRNO("pomp_evt_signal", -err);
+			goto wait;
 		}
 
 		struct mbuf_raw_video_frame *frame;
-		int res = mbuf_raw_video_frame_queue_pop(self->meta_queue,
-							 &frame);
+		int res = mbuf_raw_video_frame_queue_peek(self->meta_queue,
+							  &frame);
 		if (res == 0) {
 			pthread_mutex_unlock(&self->pull.mutex);
-			pull_frame(self, frame);
+			/* Note: pull_frame unrefs the frame */
+			int err = pull_frame(self, frame);
+			if (err == -EAGAIN) {
+				/* Retry later */
+				pthread_mutex_lock(&self->pull.mutex);
+				goto wait;
+			} else if (err < 0) {
+				VENC_LOG_ERRNO("pull_frame", -err);
+			}
+			/* Pop the frame for real */
+			res = mbuf_raw_video_frame_queue_pop(self->meta_queue,
+							     &frame);
+			if (res < 0) {
+				VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_pop",
+					       -res);
+				pthread_mutex_lock(&self->pull.mutex);
+				continue;
+			}
+			err = mbuf_raw_video_frame_unref(frame);
+			if (err < 0) {
+				VENC_LOG_ERRNO("mbuf_raw_video_frame_unref",
+					       -err);
+			}
 			pthread_mutex_lock(&self->pull.mutex);
 			continue;
 		} else if (res == -EAGAIN && self->pull.eos_flag) {
 			self->pull.eos_flag = false;
 			self->eos_flag = true;
-			pomp_evt_signal(self->out_evt);
+			err = pomp_evt_signal(self->out_evt);
+			if (err < 0)
+				VENC_LOG_ERRNO("pomp_evt_signal", -err);
 		} else if (res != -EAGAIN) {
-			ULOG_ERRNO("mbuf_raw_video_frame_queue_pop", -res);
+			VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_peek", -res);
 		}
 
-		pthread_cond_wait(&self->pull.cond, &self->pull.mutex);
+		/* clang-format off */
+wait:
+		/* clang-format on */
+		while (!self->pull.cond_signalled)
+			pthread_cond_wait(&self->pull.cond, &self->pull.mutex);
 	}
 
 	return NULL;
@@ -1266,11 +1556,10 @@ static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 	struct vdef_raw_frame info;
 	struct venc_mediacodec *self = userdata;
 
-	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, false);
+	VENC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, false);
 
-	if (self->state == WAITING_FOR_FLUSH ||
-	    self->state == WAITING_FOR_STOP || self->push.eos_flag == true ||
-	    self->pull.eos_flag == true)
+	if ((atomic_load(&self->state) != RUNNING) || self->push.eos_flag ||
+	    self->pull.eos_flag)
 		return false;
 
 	ret = mbuf_raw_video_frame_get_frame_info(frame, &info);
@@ -1290,7 +1579,7 @@ static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 	/* Input frame must be packed */
 	ret = mbuf_raw_video_frame_get_packed_buffer(frame, &tmp, &tmplen);
 	if (ret != 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_get_packed_buffer", -ret);
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_packed_buffer", -ret);
 		return false;
 	}
 	mbuf_raw_video_frame_release_packed_buffer(frame, tmp);
@@ -1305,7 +1594,10 @@ static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 static int create(struct venc_encoder *base)
 {
 	int ret;
-	struct venc_mediacodec *self;
+	struct venc_mediacodec *self = NULL;
+	struct venc_config_mediacodec *specific;
+	struct pomp_evt *evt;
+	media_status_t status;
 
 	const struct venc_config *c = &base->config;
 
@@ -1332,48 +1624,82 @@ static int create(struct venc_encoder *base)
 		return -EINVAL;
 	}
 
+	specific = (struct venc_config_mediacodec *)venc_config_get_specific(
+		&base->config, VENC_ENCODER_IMPLEM_MEDIACODEC);
+
 	self = calloc(1, sizeof(*self));
 	if (self == NULL)
 		return -ENOMEM;
 
 	base->derived = self;
 	self->base = base;
-	self->state = RUNNING;
+	atomic_init(&self->state, RUNNING);
+
+	pthread_mutex_init(&self->push.mutex, NULL);
+	pthread_cond_init(&self->push.cond, NULL);
+
+	pthread_mutex_init(&self->pull.mutex, NULL);
+	pthread_cond_init(&self->pull.cond, NULL);
+
+	/* Create a new mbuf_mem for meta_frame */
+	ret = mbuf_mem_generic_new(sizeof(uint32_t), &self->mem);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("mbuf_mem_generic_new", -ret);
+		goto error;
+	}
 
 	self->mc = AMediaCodec_createEncoderByType(mime_type);
 	if (self->mc == NULL) {
 		ret = -ENOSYS;
-		ULOG_ERRNO("AMediaCodec_createEncoderByType", -ret);
+		VENC_LOG_ERRNO("AMediaCodec_createEncoderByType", -ret);
 		goto error;
 	}
 
-	AMediaFormat *format = AMediaFormat_new();
+	status = AMediaCodec_getName(self->mc, &self->enc_name);
+	if (status < 0) {
+		VENC_LOGE(
+			"AMediaCodec"
+			"_getName (%s:%d)",
+			media_status_to_str((media_status_t)status),
+			(media_status_t)status);
+		ret = -EPROTO;
+		goto error;
+	}
+
+	VENC_LOGI("mediacodec implementation (%s)", self->enc_name);
+
+	self->format = AMediaFormat_new();
 
 	/* The keys `AMediaFormat` accepts are detailed at
 	 * https://developer.android.com/reference/android/media/MediaFormat.html
 	 */
 
-	AMediaFormat_setString(format, "mime", mime_type);
+	AMediaFormat_setString(self->format, "mime", mime_type);
 
-	AMediaFormat_setInt32(format, "width", c->input.info.resolution.width);
 	AMediaFormat_setInt32(
-		format, "height", c->input.info.resolution.height);
+		self->format, "width", c->input.info.resolution.width);
+	AMediaFormat_setInt32(
+		self->format, "height", c->input.info.resolution.height);
 
 	enum color_format color_format;
-	if (vdef_raw_format_cmp(&c->input.format, &vdef_i420)) {
+	if (vdef_raw_format_cmp(&c->input.format, &vdef_opaque) &&
+	    specific != NULL && specific->surface != NULL) {
+		color_format = COLOR_FORMAT_SURFACE;
+	} else if (vdef_raw_format_cmp(&c->input.format, &vdef_i420) &&
+		   (specific == NULL || specific->surface == NULL)) {
 		color_format = YUV420_PLANAR;
-	} else if (vdef_raw_format_cmp(&c->input.format, &vdef_nv12)) {
+	} else if (vdef_raw_format_cmp(&c->input.format, &vdef_nv12) &&
+		   (specific == NULL || specific->surface == NULL)) {
 		color_format = YUV420_SEMIPLANAR;
 	} else {
-		AMediaFormat_delete(format);
 		ret = -ENOSYS;
 		goto error;
 	}
-	AMediaFormat_setInt32(format, "color-format", color_format);
+	AMediaFormat_setInt32(self->format, "color-format", color_format);
 
 	float framerate = ((float)c->input.info.framerate.num) /
 			  ((float)c->input.info.framerate.den);
-	AMediaFormat_setFloat(format, "frame-rate", framerate);
+	AMediaFormat_setFloat(self->format, "frame-rate", framerate);
 
 	switch (c->encoding) {
 	case VDEF_ENCODING_H264:
@@ -1382,11 +1708,9 @@ static int create(struct venc_encoder *base)
 			.target_bitrate = c->h264.target_bitrate,
 			.decimation = c->h264.decimation,
 		};
-		ret = h264_fill_format(format, c);
-		if (ret < 0) {
-			AMediaFormat_delete(format);
+		ret = h264_fill_format(self->format, c);
+		if (ret < 0)
 			goto error;
-		}
 		break;
 
 	case VDEF_ENCODING_H265:
@@ -1395,32 +1719,41 @@ static int create(struct venc_encoder *base)
 			.target_bitrate = c->h265.target_bitrate,
 			.decimation = c->h265.decimation,
 		};
-		ret = h265_fill_format(format, c);
-		if (ret < 0) {
-			AMediaFormat_delete(format);
+		ret = h265_fill_format(self->format, c);
+		if (ret < 0)
 			goto error;
-		}
 		break;
 
 	default:
-		AMediaFormat_delete(format);
 		ret = -ENOSYS;
 		goto error;
 	}
 
-	media_status_t status =
-		AMediaCodec_configure(self->mc,
-				      format,
-				      NULL,
-				      NULL,
-				      AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
-
-	AMediaFormat_delete(format);
-
+	status = AMediaCodec_configure(self->mc,
+				       self->format,
+				       NULL,
+				       NULL,
+				       AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
 	if (status != AMEDIA_OK) {
 		ret = -EPROTO;
-		ULOG_ERRNO("mediacodec.configure status=%d", -ret, status);
+		VENC_LOGE("AMediaCodec_configure (%s:%d)",
+			  media_status_to_str(status),
+			  status);
 		goto error;
+	}
+
+	if (specific != NULL && specific->surface != NULL) {
+		self->surface = (ANativeWindow *)specific->surface;
+		VENC_LOGI("using input from surface (%p)", self->surface);
+		ANativeWindow_acquire(self->surface);
+		status = AMediaCodec_setInputSurface(self->mc, self->surface);
+		if (status != AMEDIA_OK) {
+			ret = -EPROTO;
+			VENC_LOGE("AMediaCodec_setInputSurface (%s:%d)",
+				  media_status_to_str(status),
+				  status);
+			goto error;
+		}
 	}
 
 	struct mbuf_raw_video_frame_queue_args queue_args = {
@@ -1430,19 +1763,32 @@ static int create(struct venc_encoder *base)
 	ret = mbuf_raw_video_frame_queue_new_with_args(&queue_args,
 						       &self->in_queue);
 	if (ret < 0) {
-		ULOG_ERRNO("mbuf_raw_video_frame_queue_new:input", -ret);
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_new:input", -ret);
 		goto error;
 	}
 
 	ret = mbuf_raw_video_frame_queue_new(&self->meta_queue);
 	if (ret < 0) {
-		ULOG_ERRNO("vbuf_queue_new:meta", -ret);
+		VENC_LOG_ERRNO("vbuf_queue_new:meta", -ret);
+		goto error;
+	}
+
+	ret = mbuf_raw_video_frame_queue_get_event(self->in_queue, &evt);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_get_event(in)",
+			       -ret);
+		goto error;
+	}
+
+	ret = pomp_evt_attach_to_loop(evt, base->loop, on_input_event, self);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("pomp_evt_attach_to_loop", -ret);
 		goto error;
 	}
 
 	ret = mbuf_coded_video_frame_queue_new(&self->out_queue);
 	if (ret < 0) {
-		ULOG_ERRNO("vbuf_queue_new:output", -ret);
+		VENC_LOG_ERRNO("vbuf_queue_new:output", -ret);
 		goto error;
 	}
 
@@ -1455,21 +1801,23 @@ static int create(struct venc_encoder *base)
 	ret = pomp_evt_attach_to_loop(
 		self->out_evt, base->loop, on_output_event, self);
 	if (ret < 0) {
-		ULOG_ERRNO("pomp_event_attach_to_loop", -ret);
+		VENC_LOG_ERRNO("pomp_event_attach_to_loop", -ret);
 		goto error;
 	}
 
 	status = AMediaCodec_start(self->mc);
 	if (status != AMEDIA_OK) {
 		ret = -EPROTO;
-		ULOG_ERRNO("mediacodec.start status=%d", -ret, status);
+		VENC_LOGE("AMediaCodec_start (%s:%d)",
+			  media_status_to_str(status),
+			  status);
 		goto error;
 	}
 
 	ret = pthread_create(&self->push.thread, NULL, push_routine, self);
 	if (ret != 0) {
 		ret = -ret;
-		ULOG_ERRNO("pthread_create", -ret);
+		VENC_LOG_ERRNO("pthread_create", -ret);
 		goto error;
 	}
 	self->push.thread_created = true;
@@ -1477,7 +1825,7 @@ static int create(struct venc_encoder *base)
 	ret = pthread_create(&self->pull.thread, NULL, pull_routine, self);
 	if (ret != 0) {
 		ret = -ret;
-		ULOG_ERRNO("pthread_create", -ret);
+		VENC_LOG_ERRNO("pthread_create", -ret);
 		goto error;
 	}
 	self->pull.thread_created = true;
@@ -1548,19 +1896,14 @@ static int set_dyn_config(struct venc_encoder *base,
 	    decimation == self->dynconf.decimation)
 		return 0;
 
-	AMediaFormat *format = AMediaFormat_new();
-	if (format == NULL) {
-		ULOG_ERRNO("AMediaFormat_new", ENOMEM);
-		return -ENOMEM;
-	}
 	int32_t bitrate = config->target_bitrate * decimation;
-	AMediaFormat_setInt32(format, "video-bitrate", bitrate);
+	AMediaFormat_setInt32(self->format, "video-bitrate", bitrate);
 
-	media_status_t status = self->set_parameters(self->mc, format);
-	AMediaFormat_delete(format);
-
+	media_status_t status = self->set_parameters(self->mc, self->format);
 	if (status != AMEDIA_OK) {
-		ULOG_ERRNO("AMediaCodec_setParameters", ENOSYS);
+		VENC_LOGE("AMediaCodec_setParameters (%s:%d)",
+			  media_status_to_str(status),
+			  status);
 		return -ENOSYS;
 	}
 	self->dynconf.target_bitrate = config->target_bitrate;
