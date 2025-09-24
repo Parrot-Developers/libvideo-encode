@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2021 Parrot Drones SAS
+ * Copyright (c) 2017 Parrot Drones SAS
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -24,68 +24,56 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _VENC_X265_PRIV_H_
-#define _VENC_X265_PRIV_H_
+#ifndef _VENC_FFMPEG_H_
+#define _VENC_FFMPEG_H_
 
-#include <pthread.h>
-#include <stdatomic.h>
-#include <stdbool.h>
-#include <x265.h>
+#include <stdint.h>
 
-#include <futils/futils.h>
-#include <libpomp.h>
-#include <media-buffers/mbuf_coded_video_frame.h>
-#include <media-buffers/mbuf_mem.h>
-#include <media-buffers/mbuf_mem_generic.h>
-#include <media-buffers/mbuf_raw_video_frame.h>
 #include <video-encode/venc_core.h>
-#include <video-encode/venc_h265.h>
-#include <video-encode/venc_internal.h>
-#include <video-encode/venc_x265.h>
 
-#define VENC_X265_LEVEL_5_1 51
-#define VENC_X265_OUT_POOL_DEFAULT_MIN_BUF_COUNT 10
+#ifdef __cplusplus
+extern "C" {
+#endif /* __cplusplus */
 
-#define VENC_MSG_FLUSH 'f'
-#define VENC_MSG_STOP 's'
+/* To be used for all public API */
+#ifdef VENC_API_EXPORTS
+#	ifdef _WIN32
+#		define VENC_API __declspec(dllexport)
+#	else /* !_WIN32 */
+#		define VENC_API __attribute__((visibility("default")))
+#	endif /* !_WIN32 */
+#else /* !VENC_API_EXPORTS */
+#	define VENC_API
+#endif /* !VENC_API_EXPORTS */
 
 
-static inline void xfree(void **ptr)
-{
-	if (ptr) {
-		free(*ptr);
-		*ptr = NULL;
-	}
-}
+struct venc_config_ffmpeg;
 
-struct venc_x265 {
-	struct venc_encoder *base;
-	struct mbuf_raw_video_frame_queue *in_queue;
-	struct mbuf_raw_video_frame_queue *enc_in_queue;
-	struct mbuf_coded_video_frame_queue *enc_out_queue;
-	struct pomp_evt *enc_out_queue_evt;
-	const x265_api *api;
-	x265_encoder *x265;
-	x265_picture in_picture;
-	unsigned int x265_pts;
-	struct vdef_coded_format output_format;
-	unsigned int input_frame_cnt;
-	uint8_t *dummy_uv_plane;
-	size_t dummy_uv_plane_len;
-	size_t dummy_uv_plane_stride;
 
-	struct h265_reader *h265_reader;
-	bool recovery_point;
-	pthread_t thread;
-	bool thread_launched;
-	atomic_bool insert_idr;
-	atomic_bool should_stop;
-	atomic_bool flushing;
-	atomic_bool flush_discard;
-	atomic_bool flush_sent;
-	atomic_bool stopping;
-	struct mbox *mbox;
+struct venc_config_ffmpeg {
+	/* Encoder implementation for this extension.
+	 * Keep this field for compatibility with 'struct venc_config_impl' */
+	enum venc_encoder_implem implem;
+
+	/* A preset is a collection of options that will provide a certain
+	 * encoding speed to compression ratio. The changes it makes will be
+	 * applied before all other parameters are applied.
+	 * Must be dynamically allocated (will be freed). */
+	const char *preset;
+
+	/* Tune the settings. The changes it makes will be applied after the
+	 * preset but before all other parameters.
+	 * Must be dynamically allocated (will be freed). */
+	const char *tune;
 };
 
 
-#endif /* !_VENC_X265_PRIV_H_ */
+extern VENC_API const struct venc_ops venc_ffmpeg_ops;
+
+
+#ifdef __cplusplus
+}
+#endif /* __cplusplus */
+
+
+#endif /* !_VENC_FFMPEG_H_ */

@@ -34,6 +34,12 @@
         help
             Enable the fake H.264 implementation in libvideo-encode.
 
+     config VENC_FFMPEG
+        bool "venc ffmpeg implementation"
+            default false
+        help
+            Enable the ffmpeg implementation in libvideo-encode.
+
     config VENC_MEDIACODEC
         bool "venc mediacodec implementation"
             default false

@@ -83,12 +83,52 @@ static int get_supported_encodings(const enum vdef_encoding **encodings)
 }
 
 
-static int get_supported_input_formats(const struct vdef_raw_format **formats)
+static int get_supported_input_formats(enum vdef_encoding encoding,
+				       const struct vdef_raw_format **formats)
 {
 	(void)pthread_once(&supported_formats_is_init,
 			   initialize_supported_formats);
 	*formats = supported_formats;
 	return NB_SUPPORTED_FORMATS;
+}
+
+
+static int copy_implem_cfg(const struct venc_config_impl *impl_cfg,
+			   struct venc_config_impl **ret_obj)
+{
+	struct venc_config_mediacodec *specific =
+		(struct venc_config_mediacodec *)impl_cfg;
+	struct venc_config_mediacodec *copy = NULL;
+	ULOG_ERRNO_RETURN_ERR_IF(specific == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(ret_obj == NULL, EINVAL);
+
+	*ret_obj = NULL;
+
+	copy = calloc(1, sizeof(*copy));
+	ULOG_ERRNO_RETURN_ERR_IF(copy == NULL, ENOMEM);
+
+	/* Deep copy */
+	*copy = *specific;
+
+	/* Note: nothing more to do */
+
+	*ret_obj = (struct venc_config_impl *)copy;
+
+	return 0;
+}
+
+
+static int free_implem_cfg(struct venc_config_impl *impl_cfg)
+{
+	struct venc_config_mediacodec *specific =
+		(struct venc_config_mediacodec *)impl_cfg;
+	ULOG_ERRNO_RETURN_ERR_IF(specific == NULL, EINVAL);
+
+	/* Note: nothing more to do */
+
+	free((void *)specific);
+
+	return 0;
 }
 
 
@@ -98,8 +138,7 @@ static void call_flush_done(void *userdata)
 
 	VENC_LOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
 
-	if (self->base->cbs.flush)
-		self->base->cbs.flush(self->base, self->base->userdata);
+	venc_call_flush_cb(self->base);
 }
 
 
@@ -109,8 +148,7 @@ static void call_stop_done(void *userdata)
 
 	VENC_LOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
 
-	if (self->base->cbs.stop)
-		self->base->cbs.stop(self->base, self->base->userdata);
+	venc_call_stop_cb(self->base);
 }
 
 
@@ -297,12 +335,8 @@ static void on_output_event(struct pomp_evt *evt, void *userdata)
 					"mbuf_coded_video_frame_get_frame_info",
 					-err);
 			if (atomic_load(&self->state) != WAITING_FOR_FLUSH) {
-				self->base->cbs.frame_output(
-					self->base,
-					0,
-					out_frame,
-					self->base->userdata);
-				self->base->counters.out++;
+				venc_call_frame_output_cb(
+					self->base, 0, out_frame);
 			} else {
 				VENC_LOGD("discarding frame %d",
 					  out_info.info.index);
@@ -965,6 +999,14 @@ static void release_mc_mem(void *data, size_t len, void *userdata)
 }
 
 
+static void frame_release(struct mbuf_coded_video_frame *frame, void *userdata)
+{
+	struct venc_mediacodec *self = userdata;
+
+	venc_call_pre_release_cb(self->base, frame);
+}
+
+
 static int pull_frame(struct venc_mediacodec *self,
 		      struct mbuf_raw_video_frame *meta_frame)
 {
@@ -981,8 +1023,8 @@ static int pull_frame(struct venc_mediacodec *self,
 	struct vmeta_frame *metadata = NULL;
 
 	struct mbuf_coded_video_frame_cbs frame_cbs = {
-		.pre_release = self->base->cbs.pre_release,
-		.pre_release_userdata = self->base->userdata,
+		.pre_release = frame_release,
+		.pre_release_userdata = (void *)self,
 	};
 
 	while (true) {
@@ -1916,6 +1958,8 @@ static int set_dyn_config(struct venc_encoder *base,
 const struct venc_ops venc_mediacodec_ops = {
 	.get_supported_encodings = get_supported_encodings,
 	.get_supported_input_formats = get_supported_input_formats,
+	.copy_implem_cfg = copy_implem_cfg,
+	.free_implem_cfg = free_implem_cfg,
 	.create = create,
 	.flush = flush,
 	.stop = stop,

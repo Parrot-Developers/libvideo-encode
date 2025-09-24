@@ -33,6 +33,7 @@ ULOG_DECLARE_TAG(venc);
 
 /* Put preferred implementation first for autoselection */
 static const enum venc_encoder_implem supported_implems[] = {
+
 #ifdef BUILD_LIBVIDEO_ENCODE_HISI
 	VENC_ENCODER_IMPLEM_HISI,
 #endif
@@ -51,6 +52,10 @@ static const enum venc_encoder_implem supported_implems[] = {
 
 #ifdef BUILD_LIBVIDEO_ENCODE_VIDEOTOOLBOX
 	VENC_ENCODER_IMPLEM_VIDEOTOOLBOX,
+#endif
+
+#ifdef BUILD_LIBVIDEO_ENCODE_FFMPEG
+	VENC_ENCODER_IMPLEM_FFMPEG,
 #endif
 
 #ifdef BUILD_LIBVIDEO_ENCODE_X264
@@ -120,6 +125,10 @@ static const struct venc_ops *implem_ops(enum venc_encoder_implem implem)
 	case VENC_ENCODER_IMPLEM_TURBOJPEG:
 		return &venc_turbojpeg_ops;
 #endif
+#ifdef BUILD_LIBVIDEO_ENCODE_FFMPEG
+	case VENC_ENCODER_IMPLEM_FFMPEG:
+		return &venc_ffmpeg_ops;
+#endif
 #ifdef BUILD_LIBVIDEO_ENCODE_X264
 	case VENC_ENCODER_IMPLEM_X264:
 		return &venc_x264_ops;
@@ -187,16 +196,41 @@ int venc_get_supported_encodings(enum venc_encoder_implem implem,
 
 
 int venc_get_supported_input_formats(enum venc_encoder_implem implem,
+				     enum vdef_encoding encoding,
 				     const struct vdef_raw_format **formats)
 {
 	int ret;
+	const enum vdef_encoding *encodings = NULL;
+	size_t nb_encodings = 0;
+	bool found = false;
 
 	ULOG_ERRNO_RETURN_ERR_IF(!formats, EINVAL);
+
+	if ((implem == VENC_ENCODER_IMPLEM_AUTO) &&
+	    (encoding != VDEF_ENCODING_UNKNOWN)) {
+		implem = venc_get_auto_implem_by_encoding(encoding);
+		ULOG_ERRNO_RETURN_VAL_IF(
+			implem == VENC_ENCODER_IMPLEM_AUTO, -ENOSYS, 0);
+	}
 
 	ret = venc_get_implem(&implem);
 	ULOG_ERRNO_RETURN_VAL_IF(ret < 0, -ret, 0);
 
-	return implem_ops(implem)->get_supported_input_formats(formats);
+	ret = venc_get_supported_encodings(implem, &encodings);
+	ULOG_ERRNO_RETURN_VAL_IF(ret < 0, -ret, 0);
+	nb_encodings = ret;
+
+	for (size_t i = 0; i < nb_encodings; i++) {
+		if (encodings[i] == encoding) {
+			found = true;
+			break;
+		}
+	}
+	if (!found)
+		return -ENOSYS;
+
+	return implem_ops(implem)->get_supported_input_formats(encoding,
+							       formats);
 }
 
 
@@ -271,7 +305,7 @@ enum venc_encoder_implem venc_get_auto_implem_by_encoding_and_format(
 
 		if (encoding_supported) {
 			res = implem_ops(implem)->get_supported_input_formats(
-				&supported_formats);
+				encoding, &supported_formats);
 			if (res < 0)
 				continue;
 			if (vdef_raw_format_intersect(
@@ -467,8 +501,8 @@ int venc_new(struct pomp_loop *loop,
 		goto error;
 	self->ops = implem_ops(self->config.implem);
 
-	nb_supported_formats =
-		self->ops->get_supported_input_formats(&supported_formats);
+	nb_supported_formats = self->ops->get_supported_input_formats(
+		self->config.encoding, &supported_formats);
 	if (nb_supported_formats < 0) {
 		res = nb_supported_formats;
 		goto error;
@@ -529,8 +563,8 @@ int venc_new(struct pomp_loop *loop,
 			self->config.h264.level = VENC_H264_LEVEL_4_0;
 		}
 		if ((self->config.h264.rate_control == VENC_RATE_CONTROL_CQ) &&
-		    (self->config.h264.qp == 0)) {
-			VENC_LOGE("invalid QP");
+		    (self->config.h264.qp == 0 || self->config.h264.qp > 51)) {
+			VENC_LOGE("invalid QP (%u)", self->config.h264.qp);
 			res = -EINVAL;
 			goto error;
 		}
@@ -542,6 +576,35 @@ int venc_new(struct pomp_loop *loop,
 			VENC_LOGE("invalid bitrate");
 			res = -EINVAL;
 			goto error;
+		}
+		if ((self->config.h264.min_qp != 0 &&
+		     self->config.h264.min_qp > 51) ||
+		    (self->config.h264.max_qp != 0 &&
+		     self->config.h264.max_qp > 51)) {
+			VENC_LOGE(
+				"invalid min_qp (%u) "
+				"or max_qp (%u) range [1:51]",
+				self->config.h264.min_qp,
+				self->config.h264.max_qp);
+			res = -EINVAL;
+			goto error;
+		}
+		if ((self->config.h264.min_qp != 0) ||
+		    (self->config.h264.max_qp != 0)) {
+			if (self->config.h264.min_qp == 0)
+				self->config.h264.min_qp = 1;
+			if (self->config.h264.max_qp == 0)
+				self->config.h264.max_qp = 51;
+			if (self->config.h264.min_qp >
+			    self->config.h264.max_qp) {
+				VENC_LOGE(
+					"min_qp (%u) cannot be greater "
+					"than max_qp (%u)",
+					self->config.h264.min_qp,
+					self->config.h264.max_qp);
+				res = -EINVAL;
+				goto error;
+			}
 		}
 		if (self->config.h264.target_bitrate == 0) {
 			self->config.h264.target_bitrate =
@@ -605,8 +668,8 @@ int venc_new(struct pomp_loop *loop,
 			self->config.h265.level = VENC_H265_LEVEL_4_0;
 		}
 		if ((self->config.h265.rate_control == VENC_RATE_CONTROL_CQ) &&
-		    (self->config.h265.qp == 0)) {
-			VENC_LOGE("invalid QP");
+		    (self->config.h265.qp == 0 || self->config.h265.qp > 51)) {
+			VENC_LOGE("invalid QP (%u)", self->config.h265.qp);
 			res = -EINVAL;
 			goto error;
 		}
@@ -618,6 +681,35 @@ int venc_new(struct pomp_loop *loop,
 			VENC_LOGE("invalid bitrate");
 			res = -EINVAL;
 			goto error;
+		}
+		if ((self->config.h265.min_qp != 0 &&
+		     self->config.h265.min_qp > 51) ||
+		    (self->config.h265.max_qp != 0 &&
+		     self->config.h265.max_qp > 51)) {
+			VENC_LOGE(
+				"invalid min_qp (%u) "
+				"or max_qp (%u) range [1:51]",
+				self->config.h265.min_qp,
+				self->config.h265.max_qp);
+			res = -EINVAL;
+			goto error;
+		}
+		if ((self->config.h265.min_qp != 0) ||
+		    (self->config.h265.max_qp != 0)) {
+			if (self->config.h265.min_qp == 0)
+				self->config.h265.min_qp = 1;
+			if (self->config.h265.max_qp == 0)
+				self->config.h265.max_qp = 51;
+			if (self->config.h265.min_qp >
+			    self->config.h265.max_qp) {
+				VENC_LOGE(
+					"min_qp (%u) cannot be greater "
+					"than max_qp (%u)",
+					self->config.h265.min_qp,
+					self->config.h265.max_qp);
+				res = -EINVAL;
+				goto error;
+			}
 		}
 		if (self->config.h265.target_bitrate == 0)
 			self->config.h265.target_bitrate =

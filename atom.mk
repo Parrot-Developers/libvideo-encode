@@ -8,7 +8,7 @@ LOCAL_MODULE := libvideo-encode
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video encoding library
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/include
-LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu11 -D_GNU_SOURCE
 LOCAL_SRC_FILES := \
 	src/venc.c
 LOCAL_LIBRARIES := \
@@ -20,6 +20,7 @@ LOCAL_CONFIG_FILES := config.in
 $(call load-config)
 LOCAL_CONDITIONAL_LIBRARIES := \
 	CONFIG_VENC_FAKEH264:libvideo-encode-fakeh264 \
+	CONFIG_VENC_FFMPEG:libvideo-encode-ffmpeg \
 	CONFIG_VENC_HISI:libvideo-encode-hisi \
 	CONFIG_VENC_QCOM:libvideo-encode-qcom \
 	CONFIG_VENC_QCOM_JPEG:libvideo-encode-qcom-jpeg \
@@ -41,7 +42,7 @@ LOCAL_MODULE := libvideo-encode-core
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video encoding library: core files
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/core/include
-LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu11 -D_GNU_SOURCE
 LOCAL_SRC_FILES := \
 	core/src/venc_core.c \
 	core/src/venc_h264.c \
@@ -58,6 +59,38 @@ LOCAL_LIBRARIES := \
 	libvideo-defs \
 	libvideo-metadata \
 	libvideo-streaming
+
+ifeq ("$(TARGET_OS)","windows")
+  LOCAL_LDLIBS += -lws2_32
+endif
+
+include $(BUILD_LIBRARY)
+
+include $(CLEAR_VARS)
+
+# ffmpeg implementation. can be enabled in the product configuration.
+LOCAL_MODULE := libvideo-encode-ffmpeg
+LOCAL_CATEGORY_PATH := libs
+LOCAL_DESCRIPTION := Video encoding library: ffmpeg implementation
+LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/ffmpeg/include
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
+LOCAL_SRC_FILES := \
+	ffmpeg/src/venc_ffmpeg_convert.c \
+	ffmpeg/src/venc_ffmpeg.c
+LOCAL_LIBRARIES := \
+	ffmpeg-libav \
+	libfutils \
+	libh264 \
+	libh265 \
+	libmedia-buffers \
+	libmedia-buffers-memory \
+	libmedia-buffers-memory-generic \
+	libpomp \
+	libulog \
+	libvideo-defs \
+	libvideo-encode-core \
+	libvideo-metadata \
+	libvideo-streaming \
 
 ifeq ("$(TARGET_OS)","windows")
   LOCAL_LDLIBS += -lws2_32
@@ -127,7 +160,7 @@ LOCAL_MODULE := libvideo-encode-turbojpeg
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video encoding library: turbojpeg implementation
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/turbojpeg/include
-LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu11 -D_GNU_SOURCE
 LOCAL_SRC_FILES := \
 	turbojpeg/src/venc_turbojpeg.c
 LOCAL_LIBRARIES := \
@@ -152,7 +185,7 @@ LOCAL_MODULE := libvideo-encode-png
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video encoding library: png implementation
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/png/include
-LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu11 -D_GNU_SOURCE
 LOCAL_SRC_FILES := \
 	png/src/venc_png.c
 
@@ -178,7 +211,7 @@ LOCAL_MODULE := libvideo-encode-x264
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video encoding library: x264 implementation
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/x264/include
-LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu11 -D_GNU_SOURCE
 LOCAL_SRC_FILES := \
 	x264/src/venc_x264.c
 LOCAL_LIBRARIES := \
@@ -208,7 +241,7 @@ LOCAL_MODULE := libvideo-encode-x265
 LOCAL_CATEGORY_PATH := libs
 LOCAL_DESCRIPTION := Video encoding library: x265 implementation
 LOCAL_EXPORT_C_INCLUDES := $(LOCAL_PATH)/x265/include
-LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu99 -D_GNU_SOURCE
+LOCAL_CFLAGS := -DVENC_API_EXPORTS -fvisibility=hidden -std=gnu11 -D_GNU_SOURCE
 LOCAL_LDLIBS := -ldl
 LOCAL_SRC_FILES := \
 	x265/src/venc_x265.c

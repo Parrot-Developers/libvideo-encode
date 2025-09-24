@@ -108,6 +108,15 @@ extern "C" {
 		}                                                              \
 	} while (0)
 
+
+/**
+ * mbuf ancillary data key for the frame output flag.
+ *
+ * Content is a boolean.
+ */
+#define VENC_ANCILLARY_KEY_FRAME_OUTPUT "venc.frame_output"
+
+
 struct venc_ops {
 	/**
 	 * Get the supported encodings for the implementation.
@@ -123,17 +132,21 @@ struct venc_ops {
 	int (*get_supported_encodings)(const enum vdef_encoding **encodings);
 
 	/**
-	 * Get the supported input buffer data formats for the implementation.
+	 * Get the supported input buffer data formats for the implementation
+	 * and the requested encoding.
 	 * Each implementation supports at least one input format, and
 	 * optionally more. All input buffers need to be in one of the supported
 	 * formats, otherwise they will be discarded. The returned formats array
 	 * is a static array whose size is the return value of this function.
 	 * If this function returns an error (negative errno value), then the
-	 * value of *formats is undefined.
+	 * value of *formats is undefined. If the requested encoding is not
+	 * supported, -ENOSYS is returned.
+	 * @param encoding: requested encoding
 	 * @param formats: pointer to the supported formats list (output)
 	 * @return the size of the formats array, or a negative errno on error.
 	 */
 	int (*get_supported_input_formats)(
+		enum vdef_encoding encoding,
 		const struct vdef_raw_format **formats);
 
 	/**
@@ -323,8 +336,28 @@ struct venc_encoder {
 		atomic_uint pulled;
 		/* Frames that have been output (frame_output) */
 		atomic_uint out;
+		/* Frames that have been released (pre_release) */
+		atomic_uint released;
 	} counters;
 };
+
+
+VENC_API void venc_call_frame_output_cb(struct venc_encoder *base,
+					int status,
+					struct mbuf_coded_video_frame *frame);
+
+
+VENC_API void venc_call_flush_cb(struct venc_encoder *base);
+
+
+VENC_API void venc_call_stop_cb(struct venc_encoder *base);
+
+
+VENC_API void venc_call_pre_release_cb(struct venc_encoder *base,
+				       struct mbuf_coded_video_frame *frame);
+
+
+VENC_API int venc_count_unreleased_frames(struct venc_encoder *base);
 
 
 /**

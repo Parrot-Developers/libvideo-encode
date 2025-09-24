@@ -79,20 +79,22 @@ VENC_API int venc_get_supported_encodings(enum venc_encoder_implem implem,
 
 
 /**
- * Get the supported input buffer data formats for the given
- * encoder implementation.
- * Each implementation supports at least one input format,
- * and optionally more. All input buffers need to be in one of
- * the supported formats, otherwise they will be discarded.
- * The returned formats array is a static array whose size is the return value
- * of this function. If this function returns an error (negative errno value),
- * then the value of *formats is undefined.
+ * Get the supported input buffer data formats for the given encoder
+ * implementation and the given encoding.
+ * Each implementation supports at least one input format, and optionally more.
+ * All input buffers need to be in one of the supported formats, otherwise they
+ * will be discarded. The returned formats array is a static array whose size is
+ * the return value of this function. If this function returns an error
+ * (negative errno value), then the value of *formats is undefined. If the
+ * requested encoding is not supported, -ENOSYS is returned.
  * @param implem: decoder implementation
+ * @param encoding: requested encoding
  * @param formats: pointer to the supported formats list (output)
  * @return the size of the formats array, or a negative errno on error.
  */
 VENC_API int
 venc_get_supported_input_formats(enum venc_encoder_implem implem,
+				 enum vdef_encoding encoding,
 				 const struct vdef_raw_format **formats);
 
 

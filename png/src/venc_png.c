@@ -61,8 +61,7 @@ static void call_flush_done(void *userdata)
 {
 	struct venc_png *self = userdata;
 
-	if (self->base->cbs.flush)
-		self->base->cbs.flush(self->base, self->base->userdata);
+	venc_call_flush_cb(self->base);
 }
 
 
@@ -70,8 +69,7 @@ static void call_stop_done(void *userdata)
 {
 	struct venc_png *self = userdata;
 
-	if (self->base->cbs.stop)
-		self->base->cbs.stop(self->base, self->base->userdata);
+	venc_call_stop_cb(self->base);
 }
 
 
@@ -100,11 +98,22 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 			}
 			break;
 		case VENC_MSG_STOP:
-			err = pomp_loop_idle_add_with_cookie(
-				self->base->loop, call_stop_done, self, self);
-			if (err < 0) {
-				VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie",
-					       -err);
+			if ((venc_count_unreleased_frames(self->base) == 0)) {
+				err = pomp_loop_idle_add_with_cookie(
+					self->base->loop,
+					call_stop_done,
+					self,
+					self);
+				if (err < 0) {
+					VENC_LOG_ERRNO(
+						"pomp_loop_idle_add_"
+						"with_cookie",
+						-err);
+				} else {
+					atomic_store(&self->stopping, false);
+				}
+			} else {
+				atomic_store(&self->stopping, true);
 			}
 			break;
 		default:
@@ -131,9 +140,7 @@ static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 				-ret);
 			return;
 		}
-		self->base->cbs.frame_output(
-			self->base, 0, out_frame, self->base->userdata);
-		self->base->counters.out++;
+		venc_call_frame_output_cb(self->base, 0, out_frame);
 		mbuf_coded_video_frame_unref(out_frame);
 	} while (ret == 0);
 }
@@ -231,6 +238,25 @@ png_write_data_cb(png_structp png_ptr, png_bytep data, png_size_t length)
 }
 
 
+/* Can be called from any thread */
+static void frame_release(struct mbuf_coded_video_frame *frame, void *userdata)
+{
+	struct venc_png *self = userdata;
+
+	venc_call_pre_release_cb(self->base, frame);
+
+	if (atomic_load(&self->stopping) &&
+	    (venc_count_unreleased_frames(self->base) == 0)) {
+		int err = pomp_loop_idle_add_with_cookie(
+			self->base->loop, call_stop_done, self, self);
+		if (err < 0)
+			VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie", -err);
+		else
+			atomic_store(&self->stopping, false);
+	}
+}
+
+
 static int encode_frame(struct venc_png *self,
 			struct mbuf_raw_video_frame *in_frame)
 {
@@ -250,8 +276,8 @@ static int encode_frame(struct venc_png *self,
 	size_t frame_size = 0;
 
 	struct mbuf_coded_video_frame_cbs frame_cbs = {
-		.pre_release = self->base->cbs.pre_release,
-		.pre_release_userdata = self->base->userdata,
+		.pre_release = frame_release,
+		.pre_release_userdata = (void *)self,
 	};
 
 	if (!in_frame)
@@ -641,7 +667,8 @@ static int get_supported_encodings(const enum vdef_encoding **encodings)
 }
 
 
-static int get_supported_input_formats(const struct vdef_raw_format **formats)
+static int get_supported_input_formats(enum vdef_encoding encoding,
+				       const struct vdef_raw_format **formats)
 {
 	(void)pthread_once(&supported_formats_is_init,
 			   initialize_supported_formats);

@@ -89,6 +89,7 @@ struct venc_png {
 	pthread_t thread;
 	bool thread_launched;
 	atomic_bool should_stop;
+	atomic_bool stopping;
 	atomic_bool flushing;
 	atomic_bool flush_discard;
 	struct mbox *mbox;

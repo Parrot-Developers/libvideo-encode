@@ -137,8 +137,7 @@ static void call_flush_done(void *userdata)
 {
 	struct venc_videotoolbox *self = userdata;
 
-	if (self->base->cbs.flush)
-		self->base->cbs.flush(self->base, self->base->userdata);
+	venc_call_flush_cb(self->base);
 }
 
 
@@ -147,15 +146,14 @@ static void call_stop_done(void *userdata)
 	struct venc_videotoolbox *self = userdata;
 
 	atomic_store(&self->is_stopped, true);
-	if (self->base->cbs.stop)
-		self->base->cbs.stop(self->base, self->base->userdata);
+
+	venc_call_stop_cb(self->base);
 }
 
 
 static void encoder_error(struct venc_videotoolbox *self, int error)
 {
-	self->base->cbs.frame_output(
-		self->base, error, NULL, self->base->userdata);
+	venc_call_frame_output_cb(self->base, error, NULL);
 }
 
 
@@ -301,13 +299,10 @@ static void out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 			VENC_LOG_ERRNO("mbuf_coded_video_frame_get_frame_info",
 				       -err);
 		}
-		if (!atomic_load(&self->flush_discard)) {
-			self->base->cbs.frame_output(
-				self->base, 0, out_frame, self->base->userdata);
-			self->base->counters.out++;
-		} else {
+		if (!atomic_load(&self->flush_discard))
+			venc_call_frame_output_cb(self->base, 0, out_frame);
+		else
 			VENC_LOGD("discarding frame: %d", out_info.info.index);
-		}
 		err = mbuf_coded_video_frame_unref(out_frame);
 		if (err < 0)
 			VENC_LOG_ERRNO("mbuf_coded_video_frame_unref", -err);
@@ -367,6 +362,14 @@ static void cmbr_mbuf_release(void *data, size_t len, void *userdata)
 }
 
 
+static void frame_release(struct mbuf_coded_video_frame *frame, void *userdata)
+{
+	struct venc_videotoolbox *self = userdata;
+
+	venc_call_pre_release_cb(self->base, frame);
+}
+
+
 static int set_frame_metadata(struct venc_videotoolbox *self,
 			      struct mbuf_raw_video_frame *in_frame,
 			      struct mbuf_coded_video_frame **out_frame,
@@ -387,8 +390,8 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 	struct vdef_nalu out_nalu;
 
 	struct mbuf_coded_video_frame_cbs frame_cbs = {
-		.pre_release = self->base->cbs.pre_release,
-		.pre_release_userdata = self->base->userdata,
+		.pre_release = frame_release,
+		.pre_release_userdata = (void *)self,
 	};
 
 	/* Mem creation */
@@ -1821,7 +1824,8 @@ static int get_supported_encodings(const enum vdef_encoding **encodings)
 }
 
 
-static int get_supported_input_formats(const struct vdef_raw_format **formats)
+static int get_supported_input_formats(enum vdef_encoding encoding,
+				       const struct vdef_raw_format **formats)
 {
 	(void)pthread_once(&supported_formats_is_init,
 			   initialize_supported_formats);

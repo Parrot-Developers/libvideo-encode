@@ -120,6 +120,9 @@ enum venc_encoder_implem {
 	/* Fake H.264 encoder */
 	VENC_ENCODER_IMPLEM_FAKEH264,
 
+	/* FFMPEG encoder */
+	VENC_ENCODER_IMPLEM_FFMPEG,
+
 	/* Videotoolbox implementation */
 	VENC_ENCODER_IMPLEM_VIDEOTOOLBOX,
 

@@ -33,6 +33,8 @@ ULOG_DECLARE_TAG(ULOG_TAG);
 #include <futils/futils.h>
 
 
+/* X264 encoder can output coded frames of size > (YUV size /2). Enforce
+ * VENC_X264_MIN_QP >= 10 to avoid this. */
 #define VENC_X264_MIN_QP 10
 #define VENC_X264_MAX_QP 51
 
@@ -58,8 +60,7 @@ static void call_flush_done(void *userdata)
 {
 	struct venc_x264 *self = userdata;
 
-	if (self->base->cbs.flush)
-		self->base->cbs.flush(self->base, self->base->userdata);
+	venc_call_flush_cb(self->base);
 }
 
 
@@ -67,8 +68,7 @@ static void call_stop_done(void *userdata)
 {
 	struct venc_x264 *self = userdata;
 
-	if (self->base->cbs.stop)
-		self->base->cbs.stop(self->base, self->base->userdata);
+	venc_call_stop_cb(self->base);
 }
 
 
@@ -169,11 +169,23 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 					       -err);
 			break;
 		case VENC_MSG_STOP:
-			err = pomp_loop_idle_add_with_cookie(
-				self->base->loop, call_stop_done, self, self);
-			if (err < 0)
-				VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie",
-					       -err);
+			if ((venc_count_unreleased_frames(self->base) == 0)) {
+				err = pomp_loop_idle_add_with_cookie(
+					self->base->loop,
+					call_stop_done,
+					self,
+					self);
+				if (err < 0) {
+					VENC_LOG_ERRNO(
+						"pomp_loop_idle_add_"
+						"with_cookie",
+						-err);
+				} else {
+					atomic_store(&self->stopping, false);
+				}
+			} else {
+				atomic_store(&self->stopping, true);
+			}
 			break;
 		default:
 			VENC_LOGE("unknown message: %c", message);
@@ -207,13 +219,10 @@ static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 			VENC_LOG_ERRNO("mbuf_coded_video_frame_get_frame_info",
 				       -err);
 
-		if (!atomic_load(&self->flush_discard)) {
-			self->base->cbs.frame_output(
-				self->base, 0, out_frame, self->base->userdata);
-			self->base->counters.out++;
-		} else {
+		if (!atomic_load(&self->flush_discard))
+			venc_call_frame_output_cb(self->base, 0, out_frame);
+		else
 			VENC_LOGD("discarding frame %d", out_info.info.index);
-		}
 
 		mbuf_coded_video_frame_unref(out_frame);
 	} while (err == 0);
@@ -462,6 +471,25 @@ out:
 }
 
 
+/* Can be called from any thread */
+static void frame_release(struct mbuf_coded_video_frame *frame, void *userdata)
+{
+	struct venc_x264 *self = userdata;
+
+	venc_call_pre_release_cb(self->base, frame);
+
+	if (atomic_load(&self->stopping) &&
+	    (venc_count_unreleased_frames(self->base) == 0)) {
+		int err = pomp_loop_idle_add_with_cookie(
+			self->base->loop, call_stop_done, self, self);
+		if (err < 0)
+			VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie", -err);
+		else
+			atomic_store(&self->stopping, false);
+	}
+}
+
+
 static int encode_frame(struct venc_x264 *self,
 			struct mbuf_raw_video_frame *in_frame)
 {
@@ -482,8 +510,8 @@ static int encode_frame(struct venc_x264 *self,
 	unsigned int plane_count = 0;
 
 	struct mbuf_coded_video_frame_cbs frame_cbs = {
-		.pre_release = self->base->cbs.pre_release,
-		.pre_release_userdata = self->base->userdata,
+		.pre_release = frame_release,
+		.pre_release_userdata = (void *)self,
 	};
 
 	if (in_frame != NULL) {
@@ -953,7 +981,8 @@ static int get_supported_encodings(const enum vdef_encoding **encodings)
 }
 
 
-static int get_supported_input_formats(const struct vdef_raw_format **formats)
+static int get_supported_input_formats(enum vdef_encoding encoding,
+				       const struct vdef_raw_format **formats)
 {
 	(void)pthread_once(&supported_formats_is_init,
 			   initialize_supported_formats);
@@ -1178,8 +1207,8 @@ static int create(struct venc_encoder *base)
 	struct mbuf_raw_video_frame_queue_args queue_args = {
 		.filter = input_filter,
 	};
-	unsigned int min_qp = FUTILS_MAX(VENC_X264_MIN_QP, 1);
-	unsigned int max_qp = FUTILS_MIN(VENC_X264_MAX_QP, 51);
+	unsigned int min_qp = VENC_X264_MIN_QP;
+	unsigned int max_qp = VENC_X264_MAX_QP;
 
 	VENC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 
@@ -1312,13 +1341,10 @@ static int create(struct venc_encoder *base)
 		break;
 	}
 
-	/* X264 encoder can output coded frames of size > (YUV size /2). Enforce
-	 * the min_qp >= 10 to avoid this. */
-	if (base->config.h264.min_qp >= 1 && base->config.h264.min_qp <= 51)
+	if (base->config.h264.min_qp != 0 || base->config.h264.max_qp != 0) {
 		min_qp = FUTILS_MAX(min_qp, base->config.h264.min_qp);
-
-	if (base->config.h264.max_qp >= 1 && base->config.h264.max_qp <= 51)
-		max_qp = FUTILS_MAX(max_qp, base->config.h264.max_qp);
+		max_qp = FUTILS_MIN(max_qp, base->config.h264.max_qp);
+	}
 
 	x264_params.rc.i_qp_min = min_qp;
 	x264_params.rc.i_qp_max = max_qp;

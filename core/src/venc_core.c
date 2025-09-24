@@ -46,6 +46,8 @@ enum venc_encoder_implem venc_encoder_implem_from_str(const char *str)
 		return VENC_ENCODER_IMPLEM_QCOM_JPEG;
 	else if (strcasecmp(str, "FAKEH264") == 0)
 		return VENC_ENCODER_IMPLEM_FAKEH264;
+	else if (strcasecmp(str, "FFMPEG") == 0)
+		return VENC_ENCODER_IMPLEM_FFMPEG;
 	else if (strcasecmp(str, "VIDEOTOOLBOX") == 0)
 		return VENC_ENCODER_IMPLEM_VIDEOTOOLBOX;
 	else if (strcasecmp(str, "TURBOJPEG") == 0)
@@ -72,6 +74,8 @@ const char *venc_encoder_implem_to_str(enum venc_encoder_implem implem)
 		return "QCOM_JPEG";
 	case VENC_ENCODER_IMPLEM_FAKEH264:
 		return "FAKEH264";
+	case VENC_ENCODER_IMPLEM_FFMPEG:
+		return "FFMPEG";
 	case VENC_ENCODER_IMPLEM_VIDEOTOOLBOX:
 		return "VIDEOTOOLBOX";
 	case VENC_ENCODER_IMPLEM_TURBOJPEG:
@@ -163,6 +167,83 @@ const char *venc_intra_refresh_to_str(enum venc_intra_refresh ir)
 }
 
 
+void venc_call_frame_output_cb(struct venc_encoder *base,
+			       int status,
+			       struct mbuf_coded_video_frame *frame)
+{
+	if (!base->cbs.frame_output)
+		return;
+
+	/* Set output flag */
+	if (frame != NULL) {
+		bool output = true;
+		int err = mbuf_coded_video_frame_add_ancillary_buffer(
+			frame,
+			VENC_ANCILLARY_KEY_FRAME_OUTPUT,
+			&output,
+			sizeof(output));
+		if (err < 0)
+			ULOG_ERRNO("mbuf_raw_video_frame_add_ancillary_buffer",
+				   -err);
+	}
+
+	if ((status == 0) && (frame != NULL)) {
+		base->cbs.frame_output(base, status, frame, base->userdata);
+		atomic_fetch_add(&base->counters.out, 1);
+	} else {
+		base->cbs.frame_output(base, status, NULL, base->userdata);
+	}
+}
+
+
+void venc_call_flush_cb(struct venc_encoder *base)
+{
+	if (!base->cbs.flush)
+		return;
+
+	base->cbs.flush(base, base->userdata);
+}
+
+
+void venc_call_stop_cb(struct venc_encoder *base)
+{
+	if (!base->cbs.stop)
+		return;
+
+	base->cbs.stop(base, base->userdata);
+}
+
+
+void venc_call_pre_release_cb(struct venc_encoder *base,
+			      struct mbuf_coded_video_frame *frame)
+{
+	if (frame == NULL)
+		return;
+
+	/* Remove output flag */
+	int err = mbuf_coded_video_frame_remove_ancillary_data(
+		frame, VENC_ANCILLARY_KEY_FRAME_OUTPUT);
+	if (err == -ENOENT) {
+		/* Don't call pre-release, frame was not output */
+		return;
+	} else if (err < 0) {
+		ULOG_ERRNO("mbuf_coded_video_frame_remove_ancillary_data",
+			   -err);
+	}
+
+	atomic_fetch_add(&base->counters.released, 1);
+	if (base->cbs.pre_release != NULL)
+		base->cbs.pre_release(frame, base->userdata);
+}
+
+
+int venc_count_unreleased_frames(struct venc_encoder *base)
+{
+	return (int)atomic_load(&base->counters.released) -
+	       (int)atomic_load(&base->counters.out);
+}
+
+
 bool venc_default_input_filter(struct mbuf_raw_video_frame *frame,
 			       void *userdata)
 {
@@ -179,7 +260,8 @@ bool venc_default_input_filter(struct mbuf_raw_video_frame *frame,
 	if (ret != 0)
 		return false;
 
-	ret = encoder->ops->get_supported_input_formats(&supported_formats);
+	ret = encoder->ops->get_supported_input_formats(
+		encoder->config.encoding, &supported_formats);
 	if (ret < 0)
 		return false;
 	accept = venc_default_input_filter_internal(

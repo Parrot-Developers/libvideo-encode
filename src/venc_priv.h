@@ -51,6 +51,10 @@
 #define VENC_H265_MAIN_PROFILE 1
 #define VENC_H265_LEVEL_4_0 40
 
+#ifdef BUILD_LIBVIDEO_ENCODE_FFMPEG
+#	include <video-encode/venc_ffmpeg.h>
+#endif
+
 #ifdef BUILD_LIBVIDEO_ENCODE_X264
 #	include <video-encode/venc_x264.h>
 #endif

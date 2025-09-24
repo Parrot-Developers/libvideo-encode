@@ -1,5 +1,5 @@
 /**
- * Copyright (c) 2021 Parrot Drones SAS
+ * Copyright (c) 2017 Parrot Drones SAS
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -24,13 +24,16 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef _VENC_X265_PRIV_H_
-#define _VENC_X265_PRIV_H_
+#ifndef _VENC_FFMPEG_PRIV_H_
+#define _VENC_FFMPEG_PRIV_H_
 
+#include <libavcodec/avcodec.h>
+#include <libavutil/avutil.h>
+#include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdbool.h>
-#include <x265.h>
 
 #include <futils/futils.h>
 #include <libpomp.h>
@@ -39,15 +42,18 @@
 #include <media-buffers/mbuf_mem_generic.h>
 #include <media-buffers/mbuf_raw_video_frame.h>
 #include <video-encode/venc_core.h>
+#include <video-encode/venc_ffmpeg.h>
+#include <video-encode/venc_h264.h>
 #include <video-encode/venc_h265.h>
 #include <video-encode/venc_internal.h>
-#include <video-encode/venc_x265.h>
 
-#define VENC_X265_LEVEL_5_1 51
-#define VENC_X265_OUT_POOL_DEFAULT_MIN_BUF_COUNT 10
+#define VENC_FFMPEG_DEFAULT_THREAD_COUNT 8
 
 #define VENC_MSG_FLUSH 'f'
 #define VENC_MSG_STOP 's'
+
+#define MAX_SUPPORTED_FORMATS 3
+#define MAX_SUPPORTED_ENCODINGS 2
 
 
 static inline void xfree(void **ptr)
@@ -58,34 +64,105 @@ static inline void xfree(void **ptr)
 	}
 }
 
-struct venc_x265 {
+
+struct venc_ffmpeg_nalu_info {
+	struct vdef_nalu n;
+	size_t offset;
+};
+
+
+enum venc_ffmpeg_backend_type {
+	VENC_FFMPEG_BACKEND_TYPE_UNKNOWN = 0,
+	VENC_FFMPEG_BACKEND_TYPE_H264_NVENC,
+	VENC_FFMPEG_BACKEND_TYPE_HEVC_NVENC,
+	VENC_FFMPEG_BACKEND_TYPE_OPENH264,
+};
+
+
+struct venc_ffmpeg_backend {
+	enum venc_ffmpeg_backend_type type;
+	const char *name;
+	const AVCodec *codec;
+	bool is_hw;
+	bool is_tested;
+	bool is_supported;
+	struct vdef_raw_format supported_formats[MAX_SUPPORTED_FORMATS];
+	size_t nb_supported_formats;
+	enum vdef_encoding supported_encodings[MAX_SUPPORTED_ENCODINGS];
+	size_t nb_supported_encodings;
+};
+
+
+struct venc_ffmpeg {
 	struct venc_encoder *base;
 	struct mbuf_raw_video_frame_queue *in_queue;
 	struct mbuf_raw_video_frame_queue *enc_in_queue;
 	struct mbuf_coded_video_frame_queue *enc_out_queue;
 	struct pomp_evt *enc_out_queue_evt;
-	const x265_api *api;
-	x265_encoder *x265;
-	x265_picture in_picture;
-	unsigned int x265_pts;
-	struct vdef_coded_format output_format;
-	unsigned int input_frame_cnt;
-	uint8_t *dummy_uv_plane;
-	size_t dummy_uv_plane_len;
-	size_t dummy_uv_plane_stride;
 
-	struct h265_reader *h265_reader;
-	bool recovery_point;
+	struct venc_ffmpeg_backend *backend;
+	AVCodecContext *avcodec;
+	struct vdef_raw_format input_format;
+	AVFrame *avframe;
+	AVPacket *avpacket;
+	AVPacket *dummy_packet;
+
+	unsigned int input_frame_cnt;
+
+	struct venc_ffmpeg_nalu_info *nalus;
+	unsigned int nalu_max_count;
+	unsigned int nalu_count;
+
+	struct {
+		enum venc_rate_control rc;
+		uint64_t max_bitrate;
+		uint64_t target_bitrate;
+		uint32_t gop;
+		const char *profile_str;
+		const char *level_str;
+		const char *rc_key_str;
+		const char *rc_val_str;
+		const char *coder_str;
+		uint32_t qp;
+		uint32_t decimation;
+		uint8_t min_qp;
+		uint8_t max_qp;
+		bool use_intra_refresh;
+	} attrs;
+
+	struct {
+		uint32_t nb_slice;
+		uint32_t cur_index;
+		uint32_t first_size;
+		uint32_t last_size;
+	} slice;
+
+	struct {
+		uint8_t *buf;
+		size_t len;
+		size_t stride;
+		size_t count;
+	} dummy_uv_plane;
+
 	pthread_t thread;
 	bool thread_launched;
 	atomic_bool insert_idr;
+	atomic_bool update_bitrate;
 	atomic_bool should_stop;
+
+	atomic_bool flush_requested;
 	atomic_bool flushing;
 	atomic_bool flush_discard;
-	atomic_bool flush_sent;
-	atomic_bool stopping;
+
 	struct mbox *mbox;
+	bool ps_ready;
+
+	struct venc_dyn_config dynconf;
 };
 
 
-#endif /* !_VENC_X265_PRIV_H_ */
+/* Type conversion functions between FFMPEG & venc types */
+#include "venc_ffmpeg_convert.h"
+
+
+#endif /* !_VENC_FFMPEG_PRIV_H_ */

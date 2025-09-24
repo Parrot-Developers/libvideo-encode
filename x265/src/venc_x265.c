@@ -31,6 +31,10 @@ ULOG_DECLARE_TAG(ULOG_TAG);
 #include "venc_x265_priv.h"
 
 
+#define VENC_X265_MIN_QP 1
+#define VENC_X265_MAX_QP 51
+
+
 #define NB_SUPPORTED_ENCODINGS 1
 #define NB_SUPPORTED_FORMATS 3
 static struct vdef_raw_format supported_formats[NB_SUPPORTED_FORMATS];
@@ -50,8 +54,7 @@ static void call_flush_done(void *userdata)
 {
 	struct venc_x265 *self = userdata;
 
-	if (self->base->cbs.flush)
-		self->base->cbs.flush(self->base, self->base->userdata);
+	venc_call_flush_cb(self->base);
 }
 
 
@@ -59,8 +62,7 @@ static void call_stop_done(void *userdata)
 {
 	struct venc_x265 *self = userdata;
 
-	if (self->base->cbs.stop)
-		self->base->cbs.stop(self->base, self->base->userdata);
+	venc_call_stop_cb(self->base);
 }
 
 
@@ -88,11 +90,23 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 					       -err);
 			break;
 		case VENC_MSG_STOP:
-			err = pomp_loop_idle_add_with_cookie(
-				self->base->loop, call_stop_done, self, self);
-			if (err < 0)
-				VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie",
-					       -err);
+			if ((venc_count_unreleased_frames(self->base) == 0)) {
+				err = pomp_loop_idle_add_with_cookie(
+					self->base->loop,
+					call_stop_done,
+					self,
+					self);
+				if (err < 0) {
+					VENC_LOG_ERRNO(
+						"pomp_loop_idle_add_"
+						"with_cookie",
+						-err);
+				} else {
+					atomic_store(&self->stopping, false);
+				}
+			} else {
+				atomic_store(&self->stopping, true);
+			}
 			break;
 		default:
 			VENC_LOGE("unknown message: %c", message);
@@ -127,13 +141,10 @@ static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 			VENC_LOG_ERRNO("mbuf_coded_video_frame_get_frame_info",
 				       -err);
 
-		if (!atomic_load(&self->flush_discard)) {
-			self->base->cbs.frame_output(
-				self->base, 0, out_frame, self->base->userdata);
-			self->base->counters.out++;
-		} else {
+		if (!atomic_load(&self->flush_discard))
+			venc_call_frame_output_cb(self->base, 0, out_frame);
+		else
 			VENC_LOGD("discarding frame %d", out_info.info.index);
-		}
 
 		mbuf_coded_video_frame_unref(out_frame);
 	} while (err == 0);
@@ -399,6 +410,25 @@ out:
 }
 
 
+/* Can be called from any thread */
+static void frame_release(struct mbuf_coded_video_frame *frame, void *userdata)
+{
+	struct venc_x265 *self = userdata;
+
+	venc_call_pre_release_cb(self->base, frame);
+
+	if (atomic_load(&self->stopping) &&
+	    (venc_count_unreleased_frames(self->base) == 0)) {
+		int err = pomp_loop_idle_add_with_cookie(
+			self->base->loop, call_stop_done, self, self);
+		if (err < 0)
+			VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie", -err);
+		else
+			atomic_store(&self->stopping, false);
+	}
+}
+
+
 static int encode_frame(struct venc_x265 *self,
 			struct mbuf_raw_video_frame *in_frame)
 {
@@ -421,8 +451,8 @@ static int encode_frame(struct venc_x265 *self,
 	unsigned int plane_count = 0;
 
 	struct mbuf_coded_video_frame_cbs frame_cbs = {
-		.pre_release = self->base->cbs.pre_release,
-		.pre_release_userdata = self->base->userdata,
+		.pre_release = frame_release,
+		.pre_release_userdata = (void *)self,
 	};
 
 	if (in_frame != NULL) {
@@ -893,7 +923,8 @@ static int get_supported_encodings(const enum vdef_encoding **encodings)
 }
 
 
-static int get_supported_input_formats(const struct vdef_raw_format **formats)
+static int get_supported_input_formats(enum vdef_encoding encoding,
+				       const struct vdef_raw_format **formats)
 {
 	(void)pthread_once(&supported_formats_is_init,
 			   initialize_supported_formats);
@@ -1140,6 +1171,8 @@ static int create(struct venc_encoder *base)
 	struct mbuf_raw_video_frame_queue_args queue_args = {
 		.filter = input_filter,
 	};
+	unsigned int min_qp = VENC_X265_MIN_QP;
+	unsigned int max_qp = VENC_X265_MAX_QP;
 
 	VENC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 
@@ -1290,6 +1323,14 @@ static int create(struct venc_encoder *base)
 		x265_params->rc.qp = base->config.h265.qp;
 		break;
 	}
+
+	if (base->config.h265.min_qp != 0 || base->config.h265.max_qp != 0) {
+		min_qp = FUTILS_MAX(min_qp, base->config.h265.min_qp);
+		max_qp = FUTILS_MIN(max_qp, base->config.h265.max_qp);
+	}
+
+	x265_params->rc.qpMin = min_qp;
+	x265_params->rc.qpMax = max_qp;
 
 	ret = self->api->param_apply_profile(
 		x265_params,
