@@ -66,7 +66,8 @@ static void call_stop_done(void *userdata)
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct venc_turbojpeg *self = userdata;
-	int ret, err;
+	int ret;
+	int err;
 	char message;
 
 	do {
@@ -115,9 +116,12 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 
 static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 {
+	UNUSED(evt);
+
 	struct venc_turbojpeg *self = userdata;
 	struct mbuf_coded_video_frame *out_frame = NULL;
-	int ret, err;
+	int ret;
+	int err;
 	do {
 		ret = mbuf_coded_video_frame_queue_pop(self->enc_out_queue,
 						       &out_frame);
@@ -136,13 +140,14 @@ static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 	} while (ret == 0);
 }
 
-static int fill_frame(struct venc_turbojpeg *self,
+static int fill_frame(const struct venc_turbojpeg *self,
 		      struct mbuf_raw_video_frame *in_frame,
 		      struct mbuf_coded_video_frame *out_frame,
-		      unsigned char *out_picture,
+		      const unsigned char *out_picture,
 		      unsigned int out_picture_size)
 {
-	int ret = 0, err = 0;
+	int ret = 0;
+	int err = 0;
 	struct vmeta_frame *metadata = NULL;
 	struct vdef_nalu nalu = {0};
 	void *nalu_data;
@@ -230,7 +235,8 @@ static void frame_release(struct mbuf_coded_video_frame *frame, void *userdata)
 static int encode_frame(struct venc_turbojpeg *self,
 			struct mbuf_raw_video_frame *in_frame)
 {
-	int ret, err;
+	int ret;
+	int err;
 	unsigned char *out_picture = NULL;
 	long unsigned int out_picture_size = 0;
 	size_t len;
@@ -312,7 +318,8 @@ static int encode_frame(struct venc_turbojpeg *self,
 		int i = 0;
 		int width = self->in_picture.stride[1] / 2;
 		int height = self->in_picture.height / 2;
-		int up_offset = 0, vp_offset = 1;
+		int up_offset = 0;
+		int vp_offset = 1;
 
 		/* we get the plane containing UV */
 		const unsigned char *plane = self->in_picture.plane[1];
@@ -407,7 +414,7 @@ out:
 	for (unsigned int i = 0; i < self->in_picture.planes; i++) {
 		if (mbuf_planes[i] == NULL)
 			continue;
-		int err = mbuf_raw_video_frame_release_plane(
+		err = mbuf_raw_video_frame_release_plane(
 			in_frame, i, mbuf_planes[i]);
 		if (err < 0) {
 			VENC_LOG_ERRNO("mbuf_raw_video_frame_release_plane:%u",
@@ -467,7 +474,8 @@ static int complete_flush(struct venc_turbojpeg *self)
 
 static void check_input_queue(struct venc_turbojpeg *self)
 {
-	int ret, err = 0;
+	int ret;
+	int err = 0;
 	struct mbuf_raw_video_frame *in_frame;
 
 	ret = mbuf_raw_video_frame_queue_peek(self->in_queue, &in_frame);
@@ -542,7 +550,8 @@ static void input_event_cb(struct pomp_evt *evt, void *userdata)
 
 static void *encoder_thread(void *ptr)
 {
-	int ret, timeout;
+	int ret;
+	int timeout;
 	struct venc_turbojpeg *self = ptr;
 	struct pomp_loop *loop = NULL;
 	struct pomp_evt *in_queue_evt = NULL;
@@ -947,7 +956,7 @@ static int get_dyn_config(struct venc_encoder *base,
 static int set_dyn_config(struct venc_encoder *base,
 			  const struct venc_dyn_config *config)
 {
-	struct venc_turbojpeg *self;
+	const struct venc_turbojpeg *self;
 	self = base->derived;
 
 	if (config->target_bitrate != 0 &&

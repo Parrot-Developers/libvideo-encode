@@ -196,6 +196,8 @@ struct venc_mediacodec {
 	} pull;
 
 	bool eos_flag;
+	atomic_bool enc_recovering;
+	atomic_bool codec_eos_reached;
 
 	struct venc_dyn_config dynconf;
 

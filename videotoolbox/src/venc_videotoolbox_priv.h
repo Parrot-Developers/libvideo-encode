@@ -33,6 +33,7 @@
 #include <libpomp.h>
 #include <media-buffers/mbuf_coded_video_frame.h>
 #include <media-buffers/mbuf_mem.h>
+#include <media-buffers/mbuf_mem_cvpixelbuffer.h>
 #include <media-buffers/mbuf_mem_generic.h>
 #include <media-buffers/mbuf_raw_video_frame.h>
 #include <pthread.h>

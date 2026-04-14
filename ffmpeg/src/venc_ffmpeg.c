@@ -165,6 +165,8 @@ static int av_to_ulog_level(int level)
 
 static void av_log_cb(void *avcl, int level, const char *fmt, va_list vl)
 {
+	UNUSED(avcl);
+
 	char *str = NULL;
 	int l = av_to_ulog_level(level);
 	if (l == 0)
@@ -227,12 +229,12 @@ static void initialize_supported_formats(void)
 		ULOGD("supported_encodings[%zu] = %s",
 		      nb_supported_encodings,
 		      vdef_encoding_to_str(enc));
-		for (size_t i = 0; i < backend->nb_supported_formats; i++) {
+		for (size_t j = 0; j < backend->nb_supported_formats; j++) {
 			ULOGD("  - supported_formats[%zu]"
 			      " = " VDEF_RAW_FORMAT_TO_STR_FMT,
-			      i,
+			      j,
 			      VDEF_RAW_FORMAT_TO_STR_ARG(
-				      &backend->supported_formats[i]));
+				      &backend->supported_formats[j]));
 		}
 
 		supported_encodings[nb_supported_encodings] = enc;
@@ -262,8 +264,12 @@ static void call_stop_done(void *userdata)
 
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
+	UNUSED(fd);
+	UNUSED(revents);
+
 	struct venc_ffmpeg *self = userdata;
-	int ret, err;
+	int ret;
+	int err;
 	char message;
 
 	do {
@@ -332,19 +338,20 @@ static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 }
 
 
-static inline enum h264_nalu_type extract_h264_type(uint8_t *data)
+static inline enum h264_nalu_type extract_h264_type(const uint8_t *data)
 {
 	return *data & 0x1F;
 }
 
 
-static inline enum h265_nalu_type extract_h265_type(uint8_t *data)
+static inline enum h265_nalu_type extract_h265_type(const uint8_t *data)
 {
 	return (*data >> 1) & 0x3F;
 }
 
 
-static int save_h264_ps(struct venc_ffmpeg *self, uint8_t *data, size_t len)
+static int
+save_h264_ps(struct venc_ffmpeg *self, const uint8_t *data, size_t len)
 {
 	bool sps_found = false;
 	bool pps_found = false;
@@ -354,7 +361,8 @@ static int save_h264_ps(struct venc_ffmpeg *self, uint8_t *data, size_t len)
 		enum h264_nalu_type type;
 		uint8_t **ps = NULL;
 		size_t *ps_size = 0;
-		size_t start, end;
+		size_t start;
+		size_t end;
 		size_t size;
 
 		/* Find next NALU */
@@ -412,7 +420,8 @@ static int save_h264_ps(struct venc_ffmpeg *self, uint8_t *data, size_t len)
 }
 
 
-static int save_h265_ps(struct venc_ffmpeg *self, uint8_t *data, size_t len)
+static int
+save_h265_ps(struct venc_ffmpeg *self, const uint8_t *data, size_t len)
 {
 	bool vps_found = false;
 	bool sps_found = false;
@@ -423,7 +432,8 @@ static int save_h265_ps(struct venc_ffmpeg *self, uint8_t *data, size_t len)
 		enum h265_nalu_type type;
 		uint8_t **ps = NULL;
 		size_t *ps_size = 0;
-		size_t start, end;
+		size_t start;
+		size_t end;
 		size_t size;
 
 		/* Find next NALU */
@@ -591,12 +601,16 @@ static int save_ps(struct venc_ffmpeg *self, uint8_t *data, size_t len)
 static void
 venc_ffmpeg_avframe_mbuf_free(void *data, size_t len, void *userdata)
 {
+	UNUSED(data);
+	UNUSED(len);
+
 	AVPacket *packet = userdata;
 	av_packet_free(&packet);
 }
 
 
-static bool is_slice(struct venc_ffmpeg *self, const struct vdef_nalu *nalu)
+static bool is_slice(const struct venc_ffmpeg *self,
+		     const struct vdef_nalu *nalu)
 {
 	switch (self->base->config.encoding) {
 	case VDEF_ENCODING_H264:
@@ -621,7 +635,8 @@ static bool is_slice(struct venc_ffmpeg *self, const struct vdef_nalu *nalu)
 }
 
 
-static bool detect_ps(struct venc_ffmpeg *self, const struct vdef_nalu *nalu)
+static bool detect_ps(const struct venc_ffmpeg *self,
+		      const struct vdef_nalu *nalu)
 {
 	switch (self->base->config.encoding) {
 	case VDEF_ENCODING_H264:
@@ -650,7 +665,8 @@ static bool detect_ps(struct venc_ffmpeg *self, const struct vdef_nalu *nalu)
 }
 
 
-static bool detect_sei(struct venc_ffmpeg *self, const struct vdef_nalu *nalu)
+static bool detect_sei(const struct venc_ffmpeg *self,
+		       const struct vdef_nalu *nalu)
 {
 	switch (self->base->config.encoding) {
 	case VDEF_ENCODING_H264:
@@ -670,7 +686,7 @@ static bool detect_sei(struct venc_ffmpeg *self, const struct vdef_nalu *nalu)
 }
 
 
-static bool is_valid_nalu(struct venc_ffmpeg *self,
+static bool is_valid_nalu(const struct venc_ffmpeg *self,
 			  const struct vdef_nalu *nalu)
 {
 	switch (self->base->config.encoding) {
@@ -687,7 +703,7 @@ static bool is_valid_nalu(struct venc_ffmpeg *self,
 
 
 static int parse_buffer(struct venc_ffmpeg *self,
-			uint8_t *data,
+			const uint8_t *data,
 			size_t len,
 			struct vdef_coded_frame *out_info)
 {
@@ -706,7 +722,8 @@ static int parse_buffer(struct venc_ffmpeg *self,
 	/* Parse buffer to extract NALUs */
 	while (len > 0) {
 		struct venc_ffmpeg_nalu_info *nalu;
-		size_t start, end;
+		size_t start;
+		size_t end;
 		size_t size;
 		uint8_t nri = 0;
 
@@ -853,7 +870,8 @@ venc_ffmpeg_set_frame_metadata(struct venc_ffmpeg *self,
 			       struct mbuf_coded_video_frame **out_frame,
 			       AVPacket *packet)
 {
-	int ret = 0, err;
+	int ret = 0;
+	int err;
 	struct timespec cur_ts = {0, 0};
 	uint64_t ts_us;
 	struct mbuf_mem *out_mem = NULL;
@@ -1099,16 +1117,16 @@ static int venc_ffmpeg_start_flush(struct venc_ffmpeg *self)
 static int venc_ffmpeg_buffer_push_one(struct venc_ffmpeg *self,
 				       struct mbuf_raw_video_frame *in_frame)
 {
-	int ret = 0, err;
+	int ret = 0;
+	int err;
 	struct vdef_raw_frame in_info;
 	struct timespec cur_ts = {0, 0};
 	uint64_t ts_us;
-	const void *frame_data = NULL;
-	size_t frame_len;
 	size_t plane_count = 0;
 	const void *plane_data;
 	const uint8_t *in_data;
 	size_t len;
+	bool rdlock = false;
 
 	ret = mbuf_raw_video_frame_get_frame_info(in_frame, &in_info);
 	if (ret < 0) {
@@ -1142,6 +1160,13 @@ static int venc_ffmpeg_buffer_push_one(struct venc_ffmpeg *self,
 		self->avframe->linesize[i] = 0;
 	}
 
+	ret = mbuf_raw_video_frame_rdlock(in_frame);
+	if (ret != 0) {
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_rdlock", -ret);
+		goto out;
+	}
+	rdlock = true;
+
 	for (size_t i = 0; i < plane_count; i++) {
 		ret = mbuf_raw_video_frame_get_plane(
 			in_frame, i, &plane_data, &len);
@@ -1157,23 +1182,15 @@ static int venc_ffmpeg_buffer_push_one(struct venc_ffmpeg *self,
 			 * otherwise it remains in the queue. */
 			VENC_LOG_ERRNO(
 				"mbuf_raw_video_frame_get_plane(%zu)", -ret, i);
-			return ret;
+			goto out;
 		}
 	}
 	for (size_t i = plane_count;
 	     i < (plane_count + self->dummy_uv_plane.count);
 	     i++) {
 		/* Set dummy UV plane */
-		self->avframe->data[i] = (uint8_t *)self->dummy_uv_plane.buf;
+		self->avframe->data[i] = self->dummy_uv_plane.buf;
 		self->avframe->linesize[i] = self->dummy_uv_plane.stride;
-	}
-
-	ret = mbuf_raw_video_frame_get_packed_buffer(
-		in_frame, &frame_data, &frame_len);
-	if (ret != 0) {
-		VENC_LOG_ERRNO("mbuf_coded_video_frame_get_packed_buffer",
-			       -ret);
-		goto out;
 	}
 
 	self->avframe->width = in_info.info.resolution.width;
@@ -1222,9 +1239,8 @@ static int venc_ffmpeg_buffer_push_one(struct venc_ffmpeg *self,
 			       -err);
 
 out:
-	if (ret != 0 && frame_data)
-		mbuf_raw_video_frame_release_packed_buffer(in_frame,
-							   frame_data);
+	if (ret != 0 && rdlock)
+		mbuf_raw_video_frame_rdunlock(in_frame);
 	mbuf_raw_video_frame_unref(in_frame);
 	return ret;
 }
@@ -1232,25 +1248,17 @@ out:
 
 static void release_encoder_frame(struct mbuf_raw_video_frame *frame)
 {
-	/* The frame has its packed buffer referenced from the push_one
-	 * function, so we need to release it here. */
-	const void *frame_data;
-	size_t frame_len;
-
-	if (mbuf_raw_video_frame_get_packed_buffer(
-		    frame, &frame_data, &frame_len) == 0) {
-		/* Release is needed twice, because the frame packed buffer has
-		 * been acquired in venc_ffmpeg_buffer_push_one() and here. */
-		mbuf_raw_video_frame_release_packed_buffer(frame, frame_data);
-		mbuf_raw_video_frame_release_packed_buffer(frame, frame_data);
-	}
+	/* The frame has a read lock from the push_one function,
+	 * so we need to release it here. */
+	mbuf_raw_video_frame_rdunlock(frame);
 	mbuf_raw_video_frame_unref(frame);
 }
 
 
 static int venc_ffmpeg_discard_frame(struct venc_ffmpeg *self)
 {
-	int ret, avcodec_ret;
+	int ret;
+	int avcodec_ret;
 	struct mbuf_raw_video_frame *in_frame = NULL;
 	struct vdef_raw_frame in_info;
 
@@ -1300,7 +1308,9 @@ static int venc_ffmpeg_discard_frame(struct venc_ffmpeg *self)
 
 static int venc_ffmpeg_buffer_pop_all(struct venc_ffmpeg *self)
 {
-	int ret = 0, err, avcodec_ret;
+	int ret = 0;
+	int err;
+	int avcodec_ret;
 	AVPacket *packet;
 	struct mbuf_raw_video_frame *in_frame = NULL;
 	struct mbuf_coded_video_frame *out_frame = NULL;
@@ -1474,7 +1484,8 @@ static void input_event_cb(struct pomp_evt *evt, void *userdata)
 
 static void *encoder_thread(void *ptr)
 {
-	int ret, timeout;
+	int ret;
+	int timeout;
 	struct venc_ffmpeg *self = ptr;
 	struct pomp_loop *loop = NULL;
 	struct pomp_evt *in_queue_evt = NULL;
@@ -1568,7 +1579,7 @@ static int get_supported_input_formats(enum vdef_encoding encoding,
 	(void)pthread_once(&supported_formats_is_init,
 			   initialize_supported_formats);
 
-	struct venc_ffmpeg_backend *backend =
+	const struct venc_ffmpeg_backend *backend =
 		get_preferred_backend_by_encoding(encoding);
 	if (backend == NULL)
 		return -ENOSYS;
@@ -1581,8 +1592,8 @@ static int get_supported_input_formats(enum vdef_encoding encoding,
 static int copy_implem_cfg(const struct venc_config_impl *impl_cfg,
 			   struct venc_config_impl **ret_obj)
 {
-	struct venc_config_ffmpeg *specific =
-		(struct venc_config_ffmpeg *)impl_cfg;
+	const struct venc_config_ffmpeg *specific =
+		(const struct venc_config_ffmpeg *)impl_cfg;
 	struct venc_config_ffmpeg *copy = NULL;
 	ULOG_ERRNO_RETURN_ERR_IF(specific == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(ret_obj == NULL, EINVAL);
@@ -1736,8 +1747,6 @@ static int destroy(struct venc_encoder *base)
 static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 {
 	int ret;
-	const void *tmp;
-	size_t tmplen;
 	struct vdef_raw_frame info;
 	struct venc_ffmpeg *self = userdata;
 
@@ -1759,14 +1768,6 @@ static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 		    self->backend->supported_formats,
 		    self->backend->nb_supported_formats))
 		return false;
-
-	/* Input frame must be packed */
-	ret = mbuf_raw_video_frame_get_packed_buffer(frame, &tmp, &tmplen);
-	if (ret != 0) {
-		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_packed_buffer", -ret);
-		return false;
-	}
-	mbuf_raw_video_frame_release_packed_buffer(frame, tmp);
 
 	venc_default_input_filter_internal_confirm_frame(
 		self->base, frame, &info);
@@ -2266,7 +2267,7 @@ get_input_buffer_queue(struct venc_encoder *base)
 static int get_dyn_config(struct venc_encoder *base,
 			  struct venc_dyn_config *config)
 {
-	struct venc_ffmpeg *self;
+	const struct venc_ffmpeg *self;
 	ULOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 	self = (struct venc_ffmpeg *)base->derived;
 

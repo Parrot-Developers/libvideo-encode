@@ -257,7 +257,7 @@ venc_get_input_buffer_queue(struct venc_encoder *self);
  *                  (input/output, optional, can be NULL)
  * @return 0 on success, negative errno value in case of error
  */
-VENC_API int venc_get_h264_ps(struct venc_encoder *self,
+VENC_API int venc_get_h264_ps(const struct venc_encoder *self,
 			      uint8_t *sps,
 			      size_t *sps_size,
 			      uint8_t *pps,
@@ -287,7 +287,7 @@ VENC_API int venc_get_h264_ps(struct venc_encoder *self,
  *                  (input/output, optional, can be NULL)
  * @return 0 on success, negative errno value in case of error
  */
-VENC_API int venc_get_h265_ps(struct venc_encoder *self,
+VENC_API int venc_get_h265_ps(const struct venc_encoder *self,
 			      uint8_t *vps,
 			      size_t *vps_size,
 			      uint8_t *sps,
@@ -303,7 +303,7 @@ VENC_API int venc_get_h265_ps(struct venc_encoder *self,
  * in case of error
  */
 VENC_API enum venc_encoder_implem
-venc_get_used_implem(struct venc_encoder *self);
+venc_get_used_implem(const struct venc_encoder *self);
 
 
 /**

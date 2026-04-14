@@ -114,6 +114,7 @@ LOCAL_LIBRARIES := \
 	libulog \
 	libmedia-buffers \
 	libmedia-buffers-memory \
+	libmedia-buffers-memory-cvpixelbuffer \
 	libmedia-buffers-memory-generic \
 	libvideo-defs \
 	libvideo-encode-core
@@ -267,6 +268,7 @@ endif
 
 include $(BUILD_LIBRARY)
 
+ifneq ($(TARGET_OS_FLAVOUR),$(filter %$(TARGET_OS_FLAVOUR),android iphoneos iphonesimulator))
 include $(CLEAR_VARS)
 
 LOCAL_MODULE := venc
@@ -291,3 +293,4 @@ ifeq ("$(TARGET_OS)","windows")
 endif
 
 include $(BUILD_EXECUTABLE)
+endif

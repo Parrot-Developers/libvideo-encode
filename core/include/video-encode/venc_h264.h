@@ -75,7 +75,7 @@ VENC_API int venc_h264_aud_write(struct h264_ctx *h264,
 				 struct mbuf_coded_video_frame *frame);
 
 
-VENC_API int venc_h264_sps_pps_copy(struct h264_ctx *h264,
+VENC_API int venc_h264_sps_pps_copy(const struct h264_ctx *h264,
 				    struct mbuf_coded_video_frame *frame,
 				    const uint8_t *sps,
 				    size_t sps_size,

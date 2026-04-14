@@ -194,7 +194,7 @@ int venc_h265_writer_destroy(struct h265_ctx *h265)
 }
 
 
-static int set_h265_vui(struct venc_encoder *self, struct h265_sps *sps)
+static int set_h265_vui(const struct venc_encoder *self, struct h265_sps *sps)
 {
 	const struct vdef_format_info *info = &self->config.input.info;
 
@@ -346,10 +346,13 @@ out:
 int venc_h265_aud_write(struct h265_ctx *h265,
 			struct mbuf_coded_video_frame *frame)
 {
-	int res = 0, err;
+	int res = 0;
+	int err;
 	struct vdef_nalu nalu = {0};
-	size_t size, len;
-	uint8_t *data, *start;
+	size_t size;
+	size_t len;
+	uint8_t *data;
+	uint8_t *start;
 	void *void_data;
 	struct mbuf_mem *mem = NULL;
 	struct h265_nalu_header nh;
@@ -436,7 +439,12 @@ int venc_h265_aud_write(struct h265_ctx *h265,
 	}
 
 	if (info.format.data_format == VDEF_CODED_DATA_FORMAT_AVCC) {
-		uint32_t sz = htonl(bs.off);
+		if (bs.off > UINT32_MAX) {
+			res = -E2BIG;
+			ULOG_ERRNO("invalid bs.off", -res);
+			goto out;
+		}
+		uint32_t sz = htonl((uint32_t)bs.off);
 		memcpy(start, &sz, 4);
 	}
 
@@ -461,7 +469,7 @@ out:
 }
 
 
-int venc_h265_ps_copy(struct h265_ctx *h265,
+int venc_h265_ps_copy(const struct h265_ctx *h265,
 		      struct mbuf_coded_video_frame *frame,
 		      const uint8_t *vps,
 		      size_t vps_size,
@@ -470,23 +478,35 @@ int venc_h265_ps_copy(struct h265_ctx *h265,
 		      const uint8_t *pps,
 		      size_t pps_size)
 {
-	int res = 0, err;
-	uint32_t sz, start_code = htonl(0x00000001);
-	struct vdef_nalu vps_nalu = {0}, sps_nalu = {0}, pps_nalu = {0};
-	size_t size, len;
-	uint8_t *vps_data = NULL, *sps_data = NULL, *pps_data = NULL;
+	int res = 0;
+	int err;
+	uint32_t sz;
+	uint32_t start_code = htonl(0x00000001);
+	struct vdef_nalu vps_nalu = {0};
+	struct vdef_nalu sps_nalu = {0};
+	struct vdef_nalu pps_nalu = {0};
+	size_t size;
+	size_t len;
+	uint8_t *vps_data = NULL;
+	uint8_t *sps_data = NULL;
+	uint8_t *pps_data = NULL;
 	void *void_data = NULL;
-	struct mbuf_mem *vps_mem = NULL, *sps_mem = NULL, *pps_mem = NULL;
+	struct mbuf_mem *vps_mem = NULL;
+	struct mbuf_mem *sps_mem = NULL;
+	struct mbuf_mem *pps_mem = NULL;
 	struct vdef_coded_frame info;
 
 	ULOG_ERRNO_RETURN_ERR_IF(h265 == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(frame == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(vps == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(vps_size == 0, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(vps_size == 0 || vps_size > UINT32_MAX,
+				 EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(sps == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(sps_size == 0, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(sps_size == 0 || sps_size > UINT32_MAX,
+				 EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(pps == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(pps_size == 0, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(pps_size == 0 || pps_size > UINT32_MAX,
+				 EINVAL);
 
 	res = mbuf_coded_video_frame_get_frame_info(frame, &info);
 	if (res < 0) {
@@ -524,7 +544,7 @@ int venc_h265_ps_copy(struct h265_ctx *h265,
 			ULOG_ERRNO("", -res);
 			goto out;
 		}
-		sz = htonl(vps_size);
+		sz = htonl((uint32_t)vps_size);
 		memcpy(vps_data, &sz, sizeof(uint32_t));
 		size += 4;
 		vps_data += size;
@@ -578,7 +598,7 @@ int venc_h265_ps_copy(struct h265_ctx *h265,
 			ULOG_ERRNO("", -res);
 			goto out;
 		}
-		sz = htonl(sps_size);
+		sz = htonl((uint32_t)sps_size);
 		memcpy(sps_data, &sz, sizeof(uint32_t));
 		size += 4;
 		sps_data += size;
@@ -632,7 +652,7 @@ int venc_h265_ps_copy(struct h265_ctx *h265,
 			ULOG_ERRNO("", -res);
 			goto out;
 		}
-		sz = htonl(pps_size);
+		sz = htonl((uint32_t)pps_size);
 		memcpy(pps_data, &sz, sizeof(uint32_t));
 		size += 4;
 		pps_data += size;
@@ -770,10 +790,10 @@ int venc_h265_sei_add_time_code(struct h265_ctx *h265, uint64_t timestamp)
 	sei.time_code.clock_ts[0].full_timestamp_flag = 1;
 	sei.time_code.clock_ts[0].discontinuity_flag = 0;
 	sei.time_code.clock_ts[0].cnt_dropped_flag = 0;
-	sei.time_code.clock_ts[0].n_frames = n_frames;
-	sei.time_code.clock_ts[0].seconds_value = seconds_value;
-	sei.time_code.clock_ts[0].minutes_value = minutes_value;
-	sei.time_code.clock_ts[0].hours_value = hours_value;
+	sei.time_code.clock_ts[0].n_frames = (uint16_t)n_frames;
+	sei.time_code.clock_ts[0].seconds_value = (uint8_t)seconds_value;
+	sei.time_code.clock_ts[0].minutes_value = (uint8_t)minutes_value;
+	sei.time_code.clock_ts[0].hours_value = (uint8_t)hours_value;
 	sei.time_code.clock_ts[0].time_offset_length = time_offset_len;
 	sei.time_code.clock_ts[0].time_offset_value = time_offset;
 
@@ -806,18 +826,22 @@ int venc_h265_sei_add_mdcv(struct h265_ctx *h265,
 	sei.type = H265_SEI_TYPE_MASTERING_DISPLAY_COLOUR_VOLUME;
 	for (unsigned int k = 0; k < 3; k++) {
 		sei.mastering_display_colour_volume.display_primaries_x[k] =
-			roundf(primaries->color_primaries[k].x * 50000.);
+			(uint16_t)roundf(primaries->color_primaries[k].x *
+					 50000.f);
 		sei.mastering_display_colour_volume.display_primaries_y[k] =
-			roundf(primaries->color_primaries[k].y * 50000.);
+			(uint16_t)roundf(primaries->color_primaries[k].y *
+					 50000.f);
 	}
 	sei.mastering_display_colour_volume.white_point_x =
-		roundf(primaries->white_point.x * 50000.);
+		(uint16_t)roundf(primaries->white_point.x * 50000.f);
 	sei.mastering_display_colour_volume.white_point_y =
-		roundf(primaries->white_point.y * 50000.);
+		(uint16_t)roundf(primaries->white_point.y * 50000.f);
 	sei.mastering_display_colour_volume.max_display_mastering_luminance =
-		roundf(format->mdcv.max_display_mastering_luminance * 10000.);
+		(uint32_t)roundf(format->mdcv.max_display_mastering_luminance *
+				 10000.f);
 	sei.mastering_display_colour_volume.min_display_mastering_luminance =
-		roundf(format->mdcv.min_display_mastering_luminance * 10000.);
+		(uint32_t)roundf(format->mdcv.min_display_mastering_luminance *
+				 10000.f);
 
 	res = h265_ctx_add_sei(h265, &sei);
 	if (res < 0) {
@@ -836,12 +860,15 @@ int venc_h265_sei_add_cll(struct h265_ctx *h265,
 
 	ULOG_ERRNO_RETURN_ERR_IF(h265 == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(format == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(format->cll.max_cll > UINT16_MAX, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(format->cll.max_fall > UINT16_MAX, EINVAL);
 
 	struct h265_sei sei = {0};
 	sei.type = H265_SEI_TYPE_CONTENT_LIGHT_LEVEL;
-	sei.content_light_level.max_content_light_level = format->cll.max_cll;
+	sei.content_light_level.max_content_light_level =
+		(uint16_t)format->cll.max_cll;
 	sei.content_light_level.max_pic_average_light_level =
-		format->cll.max_fall;
+		(uint16_t)format->cll.max_fall;
 
 	res = h265_ctx_add_sei(h265, &sei);
 	if (res < 0) {
@@ -884,13 +911,17 @@ int venc_h265_sei_add_user_data(struct h265_ctx *h265,
 int venc_h265_sei_write(struct h265_ctx *h265,
 			struct mbuf_coded_video_frame *frame)
 {
-	int res, count, err;
+	int res;
+	int count;
+	int err;
 	struct vdef_nalu nalu = {0};
 	struct mbuf_mem *mem = NULL;
 	void *void_data;
-	uint8_t *data, *start;
+	uint8_t *data;
+	uint8_t *start;
 	struct h265_bitstream bs;
-	size_t len, size;
+	size_t len;
+	size_t size;
 	struct vdef_coded_frame info;
 
 	ULOG_ERRNO_RETURN_ERR_IF(h265 == NULL, EINVAL);
@@ -964,7 +995,12 @@ int venc_h265_sei_write(struct h265_ctx *h265,
 	}
 
 	if (info.format.data_format == VDEF_CODED_DATA_FORMAT_AVCC) {
-		uint32_t sz = htonl(bs.off);
+		if (bs.off > UINT32_MAX) {
+			res = -E2BIG;
+			ULOG_ERRNO("invalid bs.off", -res);
+			goto out;
+		}
+		uint32_t sz = htonl((uint32_t)bs.off);
 		memcpy(start, &sz, 4);
 	}
 	size += bs.off;
@@ -994,7 +1030,8 @@ int venc_h265_generate_nalus(struct venc_encoder *self,
 			     struct mbuf_coded_video_frame *frame,
 			     const struct vdef_coded_frame *info)
 {
-	int ret = 0, sei_count = 0;
+	int ret = 0;
+	int sei_count = 0;
 
 	/* AUD insertion */
 	if (self->config.h265.insert_aud) {
@@ -1140,7 +1177,7 @@ int venc_h265_format_convert(struct mbuf_coded_video_frame *frame,
 	int res = 0;
 	uint8_t *data;
 	uint32_t start_code = htonl(0x00000001);
-	const void *nalu_data;
+	void *nalu_data;
 	struct vdef_nalu nalu = {0};
 	int nalu_count;
 	struct vdef_coded_frame info;
@@ -1176,10 +1213,10 @@ int venc_h265_format_convert(struct mbuf_coded_video_frame *frame,
 	}
 
 	for (int i = 0; i < nalu_count; i++) {
-		res = mbuf_coded_video_frame_get_nalu(
+		res = mbuf_coded_video_frame_get_rw_nalu(
 			frame, i, &nalu_data, &nalu);
 		if (res < 0) {
-			ULOG_ERRNO("mbuf_coded_video_frame_get_nalu", -res);
+			ULOG_ERRNO("mbuf_coded_video_frame_get_rw_nalu", -res);
 			return res;
 		}
 		data = (uint8_t *)nalu_data;
@@ -1202,9 +1239,11 @@ int venc_h265_format_convert(struct mbuf_coded_video_frame *frame,
 			return res;
 		}
 
-		res = mbuf_coded_video_frame_release_nalu(frame, i, nalu_data);
+		res = mbuf_coded_video_frame_release_rw_nalu(
+			frame, i, nalu_data);
 		if (res < 0) {
-			ULOG_ERRNO("mbuf_coded_video_frame_release_nalu", -res);
+			ULOG_ERRNO("mbuf_coded_video_frame_release_rw_nalu",
+				   -res);
 			return res;
 		}
 	}

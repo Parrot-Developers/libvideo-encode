@@ -148,7 +148,8 @@ out:
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct venc_x264 *self = userdata;
-	int ret, err;
+	int ret;
+	int err;
 	char message;
 
 	do {
@@ -231,7 +232,9 @@ static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 
 static int generate_sps_pps(struct venc_x264 *self)
 {
-	int ret, i, nalu_count = 0;
+	int ret;
+	int i;
+	int nalu_count = 0;
 	x264_nal_t *nalu = NULL;
 	size_t len;
 
@@ -318,7 +321,8 @@ static int add_x264_nalus(struct venc_x264 *self,
 			  x264_nal_t *nalu,
 			  size_t nalu_count)
 {
-	int res, err;
+	int res;
+	int err;
 	size_t i;
 	struct mbuf_mem *nalus_mem;
 	void *nalu_data;
@@ -326,7 +330,8 @@ static int add_x264_nalus(struct venc_x264 *self,
 	size_t mem_size = 0;
 	size_t nalu_offset = 4;
 	size_t nalu_len = 0;
-	size_t offset = 0, base_offset;
+	size_t offset = 0;
+	size_t base_offset;
 	struct vdef_nalu out_nalu = {0};
 
 	for (i = 0; i < nalu_count; i++)
@@ -397,6 +402,8 @@ static int add_x264_nalus(struct venc_x264 *self,
 			 out_nalu.h264.type == H264_NALU_TYPE_SLICE_IDR)
 				? nalu[i].i_last_mb - nalu[i].i_first_mb + 1
 				: 0;
+		out_nalu.importance = venc_h264_get_nalu_importance(
+			out_nalu.h264.type, 0, out_info->type, out_info->layer);
 		res = mbuf_coded_video_frame_add_nalu(
 			out_frame, nalus_mem, base_offset, &out_nalu);
 		if (res < 0) {
@@ -493,14 +500,18 @@ static void frame_release(struct mbuf_coded_video_frame *frame, void *userdata)
 static int encode_frame(struct venc_x264 *self,
 			struct mbuf_raw_video_frame *in_frame)
 {
-	int ret, err, nalu_count = 0, frame_size;
+	int ret;
+	int err;
+	int nalu_count = 0;
+	int frame_size;
 	x264_nal_t *nalu = NULL;
 	x264_picture_t out_picture;
 	struct vdef_raw_frame info;
 	const void *plane_data;
 	const uint8_t *in_data;
-	size_t len, nalu_len = 0, nalu_offset = 4;
-	ssize_t i;
+	size_t len;
+	size_t nalu_len = 0;
+	size_t nalu_offset = 4;
 	struct mbuf_raw_video_frame *enc_frame;
 	struct mbuf_coded_video_frame *out_frame = NULL;
 	struct vdef_coded_frame out_info = {};
@@ -674,7 +685,7 @@ static int encode_frame(struct venc_x264 *self,
 		out_info.type = VDEF_CODED_FRAME_TYPE_NOT_CODED;
 
 	self->recovery_point = false;
-	for (i = 0; i < nalu_count; i++) {
+	for (int i = 0; i < nalu_count; i++) {
 		if ((*(nalu[i].p_payload + nalu_offset) & 0x1F) !=
 		    H264_NALU_TYPE_SEI) {
 			continue;
@@ -802,7 +813,8 @@ static int complete_flush(struct venc_x264 *self)
 
 static void check_input_queue(struct venc_x264 *self)
 {
-	int ret, err = 0;
+	int ret;
+	int err = 0;
 	struct mbuf_raw_video_frame *in_frame;
 
 	ret = mbuf_raw_video_frame_queue_peek(self->in_queue, &in_frame);
@@ -894,7 +906,8 @@ static void input_event_cb(struct pomp_evt *evt, void *userdata)
 
 static void *encoder_thread(void *ptr)
 {
-	int ret, timeout;
+	int ret;
+	int timeout;
 	struct venc_x264 *self = ptr;
 	struct pomp_loop *loop = NULL;
 	struct pomp_evt *in_queue_evt = NULL;
@@ -984,6 +997,8 @@ static int get_supported_encodings(const enum vdef_encoding **encodings)
 static int get_supported_input_formats(enum vdef_encoding encoding,
 				       const struct vdef_raw_format **formats)
 {
+	UNUSED(encoding);
+
 	(void)pthread_once(&supported_formats_is_init,
 			   initialize_supported_formats);
 	*formats = supported_formats;
@@ -994,7 +1009,8 @@ static int get_supported_input_formats(enum vdef_encoding encoding,
 static int copy_implem_cfg(const struct venc_config_impl *impl_cfg,
 			   struct venc_config_impl **ret_obj)
 {
-	struct venc_config_x264 *specific = (struct venc_config_x264 *)impl_cfg;
+	const struct venc_config_x264 *specific =
+		(const struct venc_config_x264 *)impl_cfg;
 	struct venc_config_x264 *copy = NULL;
 	ULOG_ERRNO_RETURN_ERR_IF(specific == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(ret_obj == NULL, EINVAL);
@@ -1141,8 +1157,6 @@ static int destroy(struct venc_encoder *base)
 static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 {
 	int ret;
-	const void *tmp;
-	size_t tmplen;
 	struct vdef_raw_frame info;
 	struct venc_x264 *self = userdata;
 
@@ -1163,14 +1177,6 @@ static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 						NB_SUPPORTED_FORMATS))
 		return false;
 
-	/* Input frame must be packed */
-	ret = mbuf_raw_video_frame_get_packed_buffer(frame, &tmp, &tmplen);
-	if (ret != 0) {
-		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_packed_buffer", -ret);
-		return false;
-	}
-	mbuf_raw_video_frame_release_packed_buffer(frame, tmp);
-
 	venc_default_input_filter_internal_confirm_frame(
 		self->base, frame, &info);
 
@@ -1183,6 +1189,10 @@ static void sei_recovery_point_cb(struct h264_ctx *ctx,
 				  const struct h264_sei_recovery_point *sei,
 				  void *userdata)
 {
+	UNUSED(ctx);
+	UNUSED(buf);
+	UNUSED(len);
+
 	struct venc_x264 *self = userdata;
 
 	self->base->recovery_frame_cnt = sei->recovery_frame_cnt;
@@ -1553,7 +1563,8 @@ static int get_dyn_config(struct venc_encoder *base,
 static int set_dyn_config(struct venc_encoder *base,
 			  const struct venc_dyn_config *config)
 {
-	int ret, update_config = 0;
+	int ret;
+	int update_config = 0;
 	x264_param_t x264_params;
 	struct venc_x264 *self;
 

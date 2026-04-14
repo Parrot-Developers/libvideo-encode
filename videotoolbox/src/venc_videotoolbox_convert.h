@@ -255,6 +255,9 @@ vdef_raw_format_to_videotoolbox(const struct vdef_raw_format *format,
 			*ret = kCVPixelFormatType_420YpCbCr8BiPlanarFullRange;
 		else
 			*ret = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;
+	} else if (vdef_raw_format_cmp(format, &vdef_bgra) ||
+		   vdef_raw_format_cmp(format, &vdef_opaque)) {
+		*ret = kCVPixelFormatType_32BGRA;
 	} else {
 		ULOGW("unsupported format: " VDEF_RAW_FORMAT_TO_STR_FMT,
 		      VDEF_RAW_FORMAT_TO_STR_ARG(format));

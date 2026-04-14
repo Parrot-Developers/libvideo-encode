@@ -324,7 +324,7 @@ static int venc_config_copy_allocated(const struct venc_config *config,
 	int ret;
 	enum venc_encoder_implem implem;
 	const struct venc_ops *ops = NULL;
-	struct venc_config_impl *impl_cfg = NULL;
+	const struct venc_config_impl *impl_cfg = NULL;
 
 	implem = config->implem;
 
@@ -401,7 +401,8 @@ error:
 
 static int venc_config_free_allocated(struct venc_config *config)
 {
-	int ret, err;
+	int ret;
+	int err;
 	enum venc_encoder_implem implem;
 	const struct venc_ops *ops = NULL;
 
@@ -486,10 +487,14 @@ int venc_new(struct pomp_loop *loop,
 		goto error;
 	}
 
-	if (self->config.name != NULL)
-		res = asprintf(&self->enc_name, "%s", self->config.name);
-	else
+	if (self->config.name != NULL) {
+		res = asprintf(&self->enc_name,
+			       "%s#%02d",
+			       self->config.name,
+			       self->enc_id);
+	} else {
 		res = asprintf(&self->enc_name, "%02d", self->enc_id);
+	}
 	if (res < 0) {
 		res = -ENOMEM;
 		ULOG_ERRNO("asprintf", -res);
@@ -781,6 +786,15 @@ int venc_flush(struct venc_encoder *self, int discard)
 {
 	ULOG_ERRNO_RETURN_ERR_IF(self == NULL, EINVAL);
 
+	VENC_LOGI("%s encoder [%u [%u %u] %u]",
+		  discard ? "flushing" : "draining",
+		  self->counters.in,
+		  self->counters.pushed,
+		  self->counters.pulled,
+		  self->counters.out);
+
+	self->flush_discard = discard;
+
 	return self->ops->flush(self, discard);
 }
 
@@ -795,7 +809,8 @@ int venc_stop(struct venc_encoder *self)
 
 int venc_destroy(struct venc_encoder *self)
 {
-	int res = 0, err;
+	int res = 0;
+	int err;
 
 	if (self == NULL)
 		return 0;
@@ -855,7 +870,7 @@ venc_get_input_buffer_queue(struct venc_encoder *self)
 }
 
 
-int venc_get_h264_ps(struct venc_encoder *self,
+int venc_get_h264_ps(const struct venc_encoder *self,
 		     uint8_t *sps,
 		     size_t *sps_size,
 		     uint8_t *pps,
@@ -892,7 +907,7 @@ int venc_get_h264_ps(struct venc_encoder *self,
 }
 
 
-int venc_get_h265_ps(struct venc_encoder *self,
+int venc_get_h265_ps(const struct venc_encoder *self,
 		     uint8_t *vps,
 		     size_t *vps_size,
 		     uint8_t *sps,
@@ -984,20 +999,21 @@ int venc_get_input_buffer_constraints(
 		nb_planes = vdef_get_raw_frame_plane_count(format);
 		memset(constraints->plane_stride_align,
 		       0,
-		       nb_planes * sizeof(*constraints->plane_stride_align));
+		       nb_planes * sizeof(constraints->plane_stride_align[0]));
 		memset(constraints->plane_scanline_align,
 		       0,
-		       nb_planes * sizeof(*constraints->plane_scanline_align));
+		       nb_planes *
+			       sizeof(constraints->plane_scanline_align[0]));
 		memset(constraints->plane_size_align,
 		       0,
-		       nb_planes * sizeof(*constraints->plane_size_align));
+		       nb_planes * sizeof(constraints->plane_size_align[0]));
 	}
 
 	return 0;
 }
 
 
-enum venc_encoder_implem venc_get_used_implem(struct venc_encoder *self)
+enum venc_encoder_implem venc_get_used_implem(const struct venc_encoder *self)
 {
 	ULOG_ERRNO_RETURN_VAL_IF(
 		self == NULL, EINVAL, VENC_ENCODER_IMPLEM_AUTO);

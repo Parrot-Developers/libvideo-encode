@@ -194,9 +194,9 @@ static void copy_nalus(uint8_t ***dsts,
 			/* Unfortunate situation: we hit a memory allocation
 			 * failure but all the user is going to get is
 			 * `venc_get_h26x_ps` returning `-EAGAIN` forever. */
-			for (size_t i = 0; i < dst_count; i++) {
-				free(dsts[i]);
-				dsts[i] = NULL;
+			for (size_t k = 0; k < dst_count; k++) {
+				free(dsts[k]);
+				dsts[k] = NULL;
 			}
 			return;
 		}
@@ -360,6 +360,7 @@ static void on_output_event(struct pomp_evt *evt, void *userdata)
 					  media_status_to_str(status),
 					  status);
 			}
+			atomic_store(&self->codec_eos_reached, false);
 			err = pomp_loop_idle_add_with_cookie(
 				self->base->loop, call_flush_done, self, self);
 			if (err < 0) {
@@ -406,9 +407,8 @@ static void on_output_event(struct pomp_evt *evt, void *userdata)
 					  media_status_to_str(status),
 					  status);
 			}
-
+			atomic_store(&self->codec_eos_reached, false);
 			atomic_store(&self->state, RUNNING);
-
 			err = pomp_loop_idle_add_with_cookie(
 				self->base->loop, call_flush_done, self, self);
 			if (err < 0) {
@@ -741,7 +741,7 @@ static int push_frame(struct venc_mediacodec *self,
 	}
 
 	for (size_t i = 0; i < nplanes; i++) {
-		int res = mbuf_raw_video_frame_get_plane(
+		res = mbuf_raw_video_frame_get_plane(
 			frame, i, planes + i, plane_lens + i);
 		if (res < 0) {
 			VENC_LOG_ERRNO("mbuf_raw_video_frame_get_plane", -res);
@@ -926,6 +926,12 @@ static void *push_routine(void *ptr)
 				if (err == -EAGAIN) {
 					/* Retry later */
 					pthread_mutex_lock(&self->push.mutex);
+					/* If an EOS is pending, do not sleep:
+					 * push the EOS to the codec */
+					if (self->push.eos_flag)
+						continue;
+					/* No frames to push and no EOS: wait
+					 * for new frames from the queue */
 					goto wait;
 				} else if (err != 0) {
 					ULOG_ERRNO("push_frame", -err);
@@ -963,7 +969,7 @@ static void *push_routine(void *ptr)
 			continue;
 		} else if (res == -EAGAIN && self->push.eos_flag) {
 			pthread_mutex_unlock(&self->push.mutex);
-			int err = push_eos(self);
+			err = push_eos(self);
 			if (err == 0)
 				self->push.eos_flag = false;
 			else if (err < 0 && err != -EAGAIN)
@@ -1007,10 +1013,74 @@ static void frame_release(struct mbuf_coded_video_frame *frame, void *userdata)
 }
 
 
+static int reopen_encoder(struct venc_mediacodec *self)
+{
+	int err;
+	media_status_t status;
+	bool needs_hard_reset = false;
+
+	if (atomic_load(&self->enc_recovering))
+		return -EBUSY;
+
+	atomic_store(&self->enc_recovering, true);
+
+	if (self->mc != NULL) {
+		status = AMediaCodec_stop(self->mc);
+		if (status != AMEDIA_OK) {
+			VENC_LOGW(
+				"encoder is zombie (%s:%d), forcing hard reset",
+				media_status_to_str(status),
+				status);
+			needs_hard_reset = true;
+		}
+	} else {
+		needs_hard_reset = true;
+	}
+
+	if (needs_hard_reset) {
+		if (self->mc) {
+			AMediaCodec_delete(self->mc);
+			self->mc = NULL;
+		}
+
+		const char *mime_type = vdef_get_encoding_mime_type(
+			self->base->config.encoding);
+		self->mc = AMediaCodec_createEncoderByType(mime_type);
+		if (self->mc == NULL) {
+			VENC_LOGE("cannot recreate encoder");
+			return -EPROTO;
+		}
+	}
+
+	status = AMediaCodec_configure(self->mc, self->format, NULL, NULL, 1);
+	if (status == AMEDIA_OK && self->surface)
+		AMediaCodec_setInputSurface(self->mc, self->surface);
+
+	/* Remove all pending previous frames from the meta queue */
+	err = mbuf_raw_video_frame_queue_flush(self->meta_queue);
+	if (err < 0)
+		VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_flush", -err);
+
+	status = AMediaCodec_start(self->mc);
+	if (status == AMEDIA_OK) {
+		VENC_LOGI("reset successful (%s)",
+			  needs_hard_reset ? "hard" : "soft");
+		atomic_store(&self->enc_recovering, false);
+		return 0;
+	} else {
+		VENC_LOGE("reset failed (%s:%d), codec is dead",
+			  media_status_to_str(status),
+			  status);
+		return -EPROTO;
+	}
+}
+
+
 static int pull_frame(struct venc_mediacodec *self,
 		      struct mbuf_raw_video_frame *meta_frame)
 {
-	int res, err;
+	int res;
+	int err;
 	AMediaCodecBufferInfo info;
 	size_t buffer_index = SIZE_MAX;
 	struct mbuf_mem *out_mem = NULL;
@@ -1047,6 +1117,21 @@ static int pull_frame(struct venc_mediacodec *self,
 						(media_status_t)status),
 					(media_status_t)status);
 				res = -EPROTO;
+				if (status == -10000 || status == -38) {
+					if (!atomic_load(
+						    &self->enc_recovering)) {
+						VENC_LOGW(
+							"fatal error detected, "
+							"attempting reopen");
+						(void)reopen_encoder(self);
+						res = -EAGAIN;
+					} else {
+						VENC_LOGE(
+							"encoder is terminal, "
+							"skipping further "
+							"recovery");
+					}
+				}
 				goto end;
 			}
 			buffer_index = status;
@@ -1059,21 +1144,85 @@ static int pull_frame(struct venc_mediacodec *self,
 				buffer_index = SIZE_MAX;
 				continue;
 			}
+			/* Handle End of Stream (EOS) signal */
+			if (info.flags &
+			    AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) {
+				VENC_LOGI("codec returned EOS (size: %d)",
+					  info.size);
+				atomic_store(&self->codec_eos_reached, true);
+				/* If the EOS buffer is empty, we must not
+				 * proceed to processing/wrapping. Release and
+				 * exit success. */
+				if (info.size == 0) {
+					res = 0;
+					goto end;
+				}
+				/* If size > 0, we fall through to end_loop to
+				 * process this last frame of data. */
+			}
 			goto end_loop;
 		}
 	}
 
 end_loop:
 	out_data =
-		AMediaCodec_getOutputBuffer(self->mc, buffer_index, &out_size) +
-		info.offset;
+		AMediaCodec_getOutputBuffer(self->mc, buffer_index, &out_size);
 	if (out_data == NULL) {
 		res = -EPROTO;
 		VENC_LOGE("AMediaCodec_getOutputBuffer");
 		goto end;
 	}
 
+	out_data += info.offset;
+
 	self->base->counters.pulled++;
+
+	if (info.size < 0 || info.offset < 0) {
+		res = -EPROTO;
+		VENC_LOGE(
+			"buffer info field is negative (offset: %d, size: %d)",
+			info.offset,
+			info.size);
+		goto end;
+	}
+
+	if (info.size == 0) {
+		res = -EPROTO;
+		VENC_LOGE(
+			"AMediaCodec returned an unexpected"
+			" empty buffer (size: 0)");
+		if (!atomic_load(&self->enc_recovering)) {
+			VENC_LOGW("fatal error detected, attempting reopen");
+			/* Clear buffer index (invalidated) */
+			if (reopen_encoder(self) == 0)
+				buffer_index = SIZE_MAX;
+			res = -EAGAIN;
+		} else {
+			VENC_LOGE(
+				"encoder is terminal, "
+				"skipping further recovery");
+		}
+		goto end;
+	}
+
+	if (((size_t)info.offset + (size_t)info.size) > out_size) {
+		VENC_LOGW(
+			"clamping buffer size from (off: %d + size: %d)"
+			" to max_size: %zu",
+			info.offset,
+			info.size,
+			out_size);
+
+		if (out_size > (size_t)info.offset) {
+			info.size = out_size - info.offset;
+		} else {
+			res = -EPROTO;
+			VENC_LOGE("buffer offset (%d) exceeds total size (%zu)",
+				  info.offset,
+				  out_size);
+			goto end;
+		}
+	}
 
 	/* buffer index is passed as argument instead of out_data buffer's
 	 * length */
@@ -1097,29 +1246,29 @@ end_loop:
 	default:
 	case VDEF_ENCODING_H264:
 		switch (self->base->config.output.preferred_format) {
-		case VDEF_CODED_DATA_FORMAT_BYTE_STREAM:
-		default:
-			out_info.format = vdef_h264_byte_stream;
-			break;
 		case VDEF_CODED_DATA_FORMAT_AVCC:
 			out_info.format = vdef_h264_avcc;
 			break;
 		case VDEF_CODED_DATA_FORMAT_RAW_NALU:
 			out_info.format = vdef_h264_raw_nalu;
 			break;
+		case VDEF_CODED_DATA_FORMAT_BYTE_STREAM:
+		default:
+			out_info.format = vdef_h264_byte_stream;
+			break;
 		}
 		break;
 	case VDEF_ENCODING_H265:
 		switch (self->base->config.output.preferred_format) {
-		case VDEF_CODED_DATA_FORMAT_BYTE_STREAM:
-		default:
-			out_info.format = vdef_h265_byte_stream;
-			break;
 		case VDEF_CODED_DATA_FORMAT_HVCC:
 			out_info.format = vdef_h265_hvcc;
 			break;
 		case VDEF_CODED_DATA_FORMAT_RAW_NALU:
 			out_info.format = vdef_h265_raw_nalu;
+			break;
+		case VDEF_CODED_DATA_FORMAT_BYTE_STREAM:
+		default:
+			out_info.format = vdef_h265_byte_stream;
 			break;
 		}
 		break;
@@ -1446,14 +1595,30 @@ static void *pull_routine(void *ptr)
 		if (res == 0) {
 			pthread_mutex_unlock(&self->pull.mutex);
 			/* Note: pull_frame unrefs the frame */
-			int err = pull_frame(self, frame);
+			err = pull_frame(self, frame);
 			if (err == -EAGAIN) {
 				/* Retry later */
 				pthread_mutex_lock(&self->pull.mutex);
+				/* If draining (EOS), do not sleep: loop
+				 * back to poll the codec */
+				if (self->pull.eos_flag) {
+					if (atomic_load(
+						    &self->codec_eos_reached)) {
+						pthread_mutex_unlock(
+							&self->pull.mutex);
+						goto force_pop;
+					}
+					continue;
+				}
+				/* Otherwise, wait for a new frame from
+				 * the push thread */
 				goto wait;
 			} else if (err < 0) {
 				VENC_LOG_ERRNO("pull_frame", -err);
 			}
+			/* clang-format off */
+force_pop:
+			/* clang-format on */
 			/* Pop the frame for real */
 			res = mbuf_raw_video_frame_queue_pop(self->meta_queue,
 							     &frame);
@@ -1601,7 +1766,7 @@ static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 	VENC_LOG_ERRNO_RETURN_ERR_IF(self == NULL, false);
 
 	if ((atomic_load(&self->state) != RUNNING) || self->push.eos_flag ||
-	    self->pull.eos_flag)
+	    self->pull.eos_flag || atomic_load(&self->enc_recovering))
 		return false;
 
 	ret = mbuf_raw_video_frame_get_frame_info(frame, &info);
@@ -1615,16 +1780,6 @@ static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 						supported_formats,
 						NB_SUPPORTED_FORMATS))
 		return false;
-
-	const void *tmp;
-	size_t tmplen;
-	/* Input frame must be packed */
-	ret = mbuf_raw_video_frame_get_packed_buffer(frame, &tmp, &tmplen);
-	if (ret != 0) {
-		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_packed_buffer", -ret);
-		return false;
-	}
-	mbuf_raw_video_frame_release_packed_buffer(frame, tmp);
 
 	venc_default_input_filter_internal_confirm_frame(
 		self->base, frame, &info);
@@ -1676,6 +1831,8 @@ static int create(struct venc_encoder *base)
 	base->derived = self;
 	self->base = base;
 	atomic_init(&self->state, RUNNING);
+	atomic_init(&self->enc_recovering, false);
+	atomic_init(&self->codec_eos_reached, false);
 
 	pthread_mutex_init(&self->push.mutex, NULL);
 	pthread_cond_init(&self->push.cond, NULL);
@@ -1785,6 +1942,13 @@ static int create(struct venc_encoder *base)
 	}
 
 	if (specific != NULL && specific->surface != NULL) {
+		if (self->dynconf.decimation > 1) {
+			ret = -ENOSYS;
+			VENC_LOGE(
+				"input surface is not compatible "
+				"with decimation");
+			goto error;
+		}
 		self->surface = (ANativeWindow *)specific->surface;
 		VENC_LOGI("using input from surface (%p)", self->surface);
 		ANativeWindow_acquire(self->surface);
@@ -1893,6 +2057,8 @@ error:
 
 static struct mbuf_pool *get_input_buffer_pool(struct venc_encoder *base)
 {
+	UNUSED(base);
+
 	return NULL;
 }
 
@@ -1908,7 +2074,7 @@ get_input_buffer_queue(struct venc_encoder *base)
 static int get_dyn_config(struct venc_encoder *base,
 			  struct venc_dyn_config *config)
 {
-	struct venc_mediacodec *self = base->derived;
+	const struct venc_mediacodec *self = base->derived;
 
 	*config = self->dynconf;
 
@@ -1925,6 +2091,9 @@ static int set_dyn_config(struct venc_encoder *base,
 		return -ENOSYS;
 
 	if (config->qp != 0)
+		return -ENOSYS;
+
+	if (self->surface != NULL && config->decimation > 1)
 		return -ENOSYS;
 
 	unsigned int target_bitrate = config->target_bitrate == 0

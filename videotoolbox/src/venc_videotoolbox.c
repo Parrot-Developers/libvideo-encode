@@ -33,7 +33,7 @@ ULOG_DECLARE_TAG(ULOG_TAG);
 
 
 #define MAX_SUPPORTED_ENCODINGS 2
-#define NB_SUPPORTED_FORMATS 3
+#define NB_SUPPORTED_FORMATS 4
 static struct vdef_raw_format supported_formats[NB_SUPPORTED_FORMATS];
 static enum vdef_encoding supported_encodings[MAX_SUPPORTED_ENCODINGS];
 static int nb_supported_encodings;
@@ -42,6 +42,8 @@ static void initialize_supported_formats(void)
 {
 	supported_formats[0] = vdef_nv12;
 	supported_formats[1] = vdef_i420;
+	supported_formats[2] = vdef_bgra;
+	supported_formats[3] = vdef_opaque;
 
 	CFMutableDictionaryRef buffer_attr = NULL;
 	VTCompressionSessionRef compress_ref;
@@ -179,7 +181,8 @@ copy_ps(uint8_t **dst, size_t *dst_size, const uint8_t *src, size_t src_size)
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct venc_videotoolbox *self = userdata;
-	int ret, err;
+	int ret;
+	int err;
 	struct venc_videotoolbox_message message;
 
 	while (true) {
@@ -220,7 +223,8 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 static CFMutableDictionaryRef buffer_attr_create(struct venc_videotoolbox *self)
 {
 	int err = 0;
-	CFMutableDictionaryRef buffer_attr = NULL, io_surface_properties = NULL;
+	CFMutableDictionaryRef buffer_attr = NULL;
+	CFMutableDictionaryRef io_surface_properties = NULL;
 	CFNumberRef pix_fmt = NULL;
 
 	buffer_attr =
@@ -350,6 +354,7 @@ static int do_flush(struct venc_videotoolbox *self)
 		VENC_LOG_ERRNO("mbox_push", -ret);
 
 	atomic_store(&self->flush, false);
+	atomic_store(&self->flush_discard, false);
 
 	return 0;
 }
@@ -375,11 +380,15 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 			      struct mbuf_coded_video_frame **out_frame,
 			      CMBlockBufferRef ref)
 {
-	int ret, err;
+	int ret;
+	int err;
 	struct vdef_raw_frame in_info;
 	struct vdef_coded_frame out_info = {};
-	uint8_t *data, *start;
-	size_t len, offset = 0, nalu_len;
+	uint8_t *data;
+	uint8_t *start;
+	size_t len;
+	size_t offset = 0;
+	size_t nalu_len;
 	uint8_t start_code[] = {0, 0, 0, 1};
 	enum vdef_coded_data_format format =
 		self->base->config.output.preferred_format;
@@ -450,14 +459,15 @@ static int set_frame_metadata(struct venc_videotoolbox *self,
 				out_info.type = VDEF_CODED_FRAME_TYPE_IDR;
 				break;
 			}
-		} else if (self->base->config.encoding == VDEF_ENCODING_H265)
-			if ((((*(data + 4) & 0x7E) >> 1) ==
+		} else if ((self->base->config.encoding ==
+			    VDEF_ENCODING_H265) &&
+			   ((((*(data + 4) & 0x7E) >> 1) ==
 			     H265_NALU_TYPE_IDR_W_RADL) ||
 			    (((*(data + 4) & 0x7E) >> 1) ==
-			     H265_NALU_TYPE_IDR_N_LP)) {
-				out_info.type = VDEF_CODED_FRAME_TYPE_IDR;
-				break;
-			}
+			     H265_NALU_TYPE_IDR_N_LP))) {
+			out_info.type = VDEF_CODED_FRAME_TYPE_IDR;
+			break;
+		}
 
 		data += 4 + nalu_len;
 		offset += 4 + nalu_len;
@@ -770,7 +780,8 @@ static void frame_output_cb(void *outputCallbackRefCon,
 			    VTEncodeInfoFlags infoFlags,
 			    CMSampleBufferRef sampleBuffer)
 {
-	int ret, err;
+	int ret;
+	int err;
 	struct venc_videotoolbox *self = outputCallbackRefCon;
 	struct mbuf_raw_video_frame *in_frame = sourceFrameRefCon;
 	struct mbuf_coded_video_frame *out_frame = NULL;
@@ -1376,7 +1387,8 @@ static int compression_session_renew(struct venc_videotoolbox *self)
 static int buffer_push_one(struct venc_videotoolbox *self,
 			   struct mbuf_raw_video_frame *in_frame)
 {
-	int ret = 0, err;
+	int ret = 0;
+	int err;
 	OSStatus osstatus;
 	struct vdef_raw_frame info = {};
 	const uint8_t *data_addr[VDEF_RAW_MAX_PLANE_COUNT] = {};
@@ -1390,6 +1402,7 @@ static int buffer_push_one(struct venc_videotoolbox *self,
 	CVPixelBufferPoolRef pool = NULL;
 	CVPixelBufferRef pix_buf = NULL;
 	bool pix_buf_locked = false;
+	bool pix_buf_copy = false;
 	int ref_count = 1;
 
 	VENC_LOG_ERRNO_RETURN_ERR_IF(in_frame == NULL, EINVAL);
@@ -1418,6 +1431,36 @@ static int buffer_push_one(struct venc_videotoolbox *self,
 	if (err < 0)
 		VENC_LOGW_ERRNO("mbuf_raw_video_frame_add_ancillary_buffer",
 				-err);
+
+	if (vdef_raw_format_cmp(&info.format, &vdef_opaque)) {
+		struct mbuf_mem_info info = {};
+		ret = mbuf_raw_video_frame_get_plane_mem_info(
+			in_frame, 0, &info);
+		if (ret < 0) {
+			VENC_LOG_ERRNO(
+				"mbuf_raw_video_frame_get_plane_mem_info",
+				-ret);
+			goto out;
+		}
+		if (info.cookie != mbuf_mem_cvpixelbuffer_cookie) {
+			ret = -EPROTO;
+			VENC_LOG_ERRNO("info.cookie", -ret);
+			goto out;
+		}
+		pix_buf = mbuf_mem_cvpixelbuffer_get_buffer_ref_specific(
+			info.specific);
+		if (pix_buf == NULL) {
+			ret = -ENOENT;
+			VENC_LOG_ERRNO(
+				"mbuf_mem_cvpixelbuffer_"
+				"get_buffer_ref_specific",
+				-ret);
+			goto out;
+		}
+		goto skip_copy;
+	}
+
+	pix_buf_copy = true;
 
 	plane_count = vdef_get_raw_frame_plane_count(&info.format);
 	if (plane_count == 0) {
@@ -1575,6 +1618,7 @@ static int buffer_push_one(struct venc_videotoolbox *self,
 	}
 	pix_buf_locked = false;
 
+skip_copy:
 	if (atomic_load(&self->idr_requested)) {
 		const void *keys[] = {kVTEncodeFrameOptionKey_ForceKeyFrame};
 		const void *vals[] = {kCFBooleanTrue};
@@ -1627,7 +1671,7 @@ static int buffer_push_one(struct venc_videotoolbox *self,
 	ret = 0;
 
 out:
-	if (pix_buf) {
+	if (pix_buf_copy && pix_buf) {
 		if (pix_buf_locked) {
 			err = CVPixelBufferUnlockBaseAddress(pix_buf, 0);
 			if (err != kCVReturnSuccess) {
@@ -1670,7 +1714,8 @@ out:
 
 static void check_input_queue(struct venc_videotoolbox *self)
 {
-	int ret, err;
+	int ret;
+	int err;
 	struct mbuf_raw_video_frame *in_frame;
 
 	ret = mbuf_raw_video_frame_queue_peek(self->in_queue, &in_frame);
@@ -1736,7 +1781,8 @@ static void input_event_cb(struct pomp_evt *evt, void *userdata)
 
 static void *encoder_thread(void *ptr)
 {
-	int ret, timeout;
+	int ret;
+	int timeout;
 	struct venc_videotoolbox *self = ptr;
 	struct pomp_loop *loop = NULL;
 	struct pomp_evt *in_queue_evt = NULL;
@@ -1936,8 +1982,6 @@ static int destroy(struct venc_encoder *base)
 static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 {
 	int ret;
-	const void *tmp;
-	size_t tmplen;
 	struct vdef_raw_frame info;
 	struct venc_videotoolbox *self = userdata;
 
@@ -1957,14 +2001,6 @@ static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 						supported_formats,
 						NB_SUPPORTED_FORMATS))
 		return false;
-
-	/* Input frame must be packed */
-	ret = mbuf_raw_video_frame_get_packed_buffer(frame, &tmp, &tmplen);
-	if (ret != 0) {
-		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_packed_buffer", -ret);
-		return false;
-	}
-	mbuf_raw_video_frame_release_packed_buffer(frame, tmp);
 
 	venc_default_input_filter_internal_confirm_frame(
 		self->base, frame, &info);

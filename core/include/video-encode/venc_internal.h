@@ -109,6 +109,9 @@ extern "C" {
 	} while (0)
 
 
+#define UNUSED(x) (void)(x)
+
+
 /**
  * mbuf ancillary data key for the frame output flag.
  *
@@ -339,6 +342,8 @@ struct venc_encoder {
 		/* Frames that have been released (pre_release) */
 		atomic_uint released;
 	} counters;
+
+	int flush_discard;
 };
 
 
@@ -396,9 +401,9 @@ VENC_API bool venc_default_input_filter(struct mbuf_raw_video_frame *frame,
  * @return true if the frame passes the checks, false otherwise
  */
 VENC_API bool venc_default_input_filter_internal(
-	struct venc_encoder *encoder,
-	struct mbuf_raw_video_frame *frame,
-	struct vdef_raw_frame *frame_info,
+	const struct venc_encoder *encoder,
+	const struct mbuf_raw_video_frame *frame,
+	const struct vdef_raw_frame *frame_info,
 	const struct vdef_raw_format *supported_formats,
 	unsigned int nb_supported_formats);
 
@@ -416,7 +421,7 @@ VENC_API bool venc_default_input_filter_internal(
 VENC_API void venc_default_input_filter_internal_confirm_frame(
 	struct venc_encoder *encoder,
 	struct mbuf_raw_video_frame *frame,
-	struct vdef_raw_frame *frame_info);
+	const struct vdef_raw_frame *frame_info);
 
 
 /**

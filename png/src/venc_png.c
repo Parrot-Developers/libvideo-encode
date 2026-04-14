@@ -76,7 +76,8 @@ static void call_stop_done(void *userdata)
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct venc_png *self = userdata;
-	int ret, err;
+	int ret;
+	int err;
 	char message;
 
 	do {
@@ -126,6 +127,8 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 
 static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 {
+	UNUSED(evt);
+
 	struct venc_png *self = userdata;
 	struct mbuf_coded_video_frame *out_frame = NULL;
 	int ret;
@@ -146,10 +149,10 @@ static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 }
 
 
-static int fill_frame(struct venc_png *self,
+static int fill_frame(const struct venc_png *self,
 		      struct mbuf_raw_video_frame *in_frame,
 		      struct mbuf_coded_video_frame *out_frame,
-		      unsigned char *out_picture,
+		      const unsigned char *out_picture,
 		      unsigned int out_picture_size)
 {
 	int ret = 0;
@@ -260,7 +263,8 @@ static void frame_release(struct mbuf_coded_video_frame *frame, void *userdata)
 static int encode_frame(struct venc_png *self,
 			struct mbuf_raw_video_frame *in_frame)
 {
-	int ret, err;
+	int ret;
+	int err;
 	size_t len;
 	struct vdef_raw_frame in_info;
 	const void *plane_data;
@@ -504,7 +508,8 @@ static int complete_flush(struct venc_png *self)
 
 static void check_input_queue(struct venc_png *self)
 {
-	int ret, err = 0;
+	int ret;
+	int err = 0;
 	struct mbuf_raw_video_frame *in_frame;
 
 	ret = mbuf_raw_video_frame_queue_peek(self->in_queue, &in_frame);
@@ -570,7 +575,8 @@ static void input_event_cb(struct pomp_evt *evt, void *userdata)
 
 static void *encoder_thread(void *ptr)
 {
-	int ret, timeout;
+	int ret;
+	int timeout;
 	struct venc_png *self = ptr;
 	struct pomp_loop *loop = NULL;
 	struct pomp_evt *in_queue_evt = NULL;
@@ -670,6 +676,8 @@ static int get_supported_encodings(const enum vdef_encoding **encodings)
 static int get_supported_input_formats(enum vdef_encoding encoding,
 				       const struct vdef_raw_format **formats)
 {
+	UNUSED(encoding);
+
 	(void)pthread_once(&supported_formats_is_init,
 			   initialize_supported_formats);
 	*formats = supported_formats;
@@ -962,6 +970,9 @@ get_input_buffer_queue(struct venc_encoder *base)
 static int get_dyn_config(struct venc_encoder *base,
 			  struct venc_dyn_config *config)
 {
+	UNUSED(base);
+	UNUSED(config);
+
 	return -ENOSYS;
 }
 
@@ -969,6 +980,9 @@ static int get_dyn_config(struct venc_encoder *base,
 static int set_dyn_config(struct venc_encoder *base,
 			  const struct venc_dyn_config *config)
 {
+	UNUSED(base);
+	UNUSED(config);
+
 	return -ENOSYS;
 }
 

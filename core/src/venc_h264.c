@@ -195,7 +195,7 @@ int venc_h264_writer_destroy(struct h264_ctx *h264)
 }
 
 
-static int set_h264_vui(struct venc_encoder *self, struct h264_sps *sps)
+static int set_h264_vui(const struct venc_encoder *self, struct h264_sps *sps)
 {
 	const struct vdef_format_info *info = &self->config.input.info;
 
@@ -348,10 +348,13 @@ out:
 int venc_h264_aud_write(struct h264_ctx *h264,
 			struct mbuf_coded_video_frame *frame)
 {
-	int res = 0, err;
+	int res = 0;
+	int err;
 	struct vdef_nalu nalu = {0};
-	size_t size, len;
-	uint8_t *data, *start;
+	size_t size;
+	size_t len;
+	uint8_t *data;
+	uint8_t *start;
 	void *void_data;
 	struct mbuf_mem *mem = NULL;
 	struct h264_nalu_header nh;
@@ -437,8 +440,19 @@ int venc_h264_aud_write(struct h264_ctx *h264,
 	}
 
 	if (info.format.data_format == VDEF_CODED_DATA_FORMAT_AVCC) {
-		uint32_t sz = htonl(bs.off);
+		if (bs.off > UINT32_MAX) {
+			res = -E2BIG;
+			ULOG_ERRNO("invalid bs.off", -res);
+			goto out;
+		}
+		uint32_t sz = htonl((uint32_t)bs.off);
 		memcpy(start, &sz, 4);
+	}
+
+	if (nh.nal_ref_idc > UINT8_MAX) {
+		res = -E2BIG;
+		ULOG_ERRNO("invalid nh.nal_ref_idc", -res);
+		goto out;
 	}
 
 	size += bs.off;
@@ -447,7 +461,7 @@ int venc_h264_aud_write(struct h264_ctx *h264,
 	nalu.h264.slice_mb_count = 0;
 	nalu.size = size;
 	nalu.importance = venc_h264_get_nalu_importance(
-		nalu.h264.type, nh.nal_ref_idc, info.type, info.layer);
+		nalu.h264.type, (uint8_t)nh.nal_ref_idc, info.type, info.layer);
 
 	res = mbuf_coded_video_frame_add_nalu(frame, mem, 0, &nalu);
 	if (res < 0) {
@@ -464,28 +478,36 @@ out:
 }
 
 
-int venc_h264_sps_pps_copy(struct h264_ctx *h264,
+int venc_h264_sps_pps_copy(const struct h264_ctx *h264,
 			   struct mbuf_coded_video_frame *frame,
 			   const uint8_t *sps,
 			   size_t sps_size,
 			   const uint8_t *pps,
 			   size_t pps_size)
 {
-	int res = 0, err;
-	uint32_t sz, start_code = htonl(0x00000001);
-	struct vdef_nalu sps_nalu = {0}, pps_nalu = {0};
-	size_t size, len;
-	uint8_t *sps_data = NULL, *pps_data = NULL;
+	int res = 0;
+	int err;
+	uint32_t sz;
+	uint32_t start_code = htonl(0x00000001);
+	struct vdef_nalu sps_nalu = {0};
+	struct vdef_nalu pps_nalu = {0};
+	size_t size;
+	size_t len;
+	uint8_t *sps_data = NULL;
+	uint8_t *pps_data = NULL;
 	void *void_data = NULL;
-	struct mbuf_mem *sps_mem = NULL, *pps_mem = NULL;
+	struct mbuf_mem *sps_mem = NULL;
+	struct mbuf_mem *pps_mem = NULL;
 	struct vdef_coded_frame info;
 
 	ULOG_ERRNO_RETURN_ERR_IF(h264 == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(frame == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(sps == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(sps_size == 0, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(sps_size == 0 || sps_size > UINT32_MAX,
+				 EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(pps == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(pps_size == 0, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(pps_size == 0 || pps_size > UINT32_MAX,
+				 EINVAL);
 
 	res = mbuf_coded_video_frame_get_frame_info(frame, &info);
 	if (res < 0) {
@@ -523,7 +545,7 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 			ULOG_ERRNO("", -res);
 			goto out;
 		}
-		sz = htonl(sps_size);
+		sz = htonl((uint32_t)sps_size);
 		memcpy(sps_data, &sz, sizeof(uint32_t));
 		size += 4;
 		sps_data += size;
@@ -580,7 +602,7 @@ int venc_h264_sps_pps_copy(struct h264_ctx *h264,
 			ULOG_ERRNO("", -res);
 			goto out;
 		}
-		sz = htonl(pps_size);
+		sz = htonl((uint32_t)pps_size);
 		memcpy(pps_data, &sz, sizeof(uint32_t));
 		size += 4;
 		pps_data += size;
@@ -744,10 +766,12 @@ int venc_h264_sei_add_parrot_streaming_v2_user_data(struct h264_ctx *h264,
 	int res;
 
 	ULOG_ERRNO_RETURN_ERR_IF(h264 == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(slice_count > UINT16_MAX, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(slice_mb_count > UINT16_MAX, EINVAL);
 
 	struct vstrm_h264_sei_streaming_v2 strm = {
-		.slice_count = slice_count,
-		.slice_mb_count = slice_mb_count,
+		.slice_count = (uint16_t)slice_count,
+		.slice_mb_count = (uint16_t)slice_mb_count,
 	};
 	size_t len = vstrm_h264_sei_streaming_v2_get_size(&strm);
 	uint8_t *data = malloc(len);
@@ -789,10 +813,14 @@ int venc_h264_sei_add_parrot_streaming_v4_user_data(
 	int res;
 
 	ULOG_ERRNO_RETURN_ERR_IF(h264 == NULL, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(slice_mb_count > UINT16_MAX, EINVAL);
+	ULOG_ERRNO_RETURN_ERR_IF(slice_mb_count_recovery_point > UINT16_MAX,
+				 EINVAL);
 
 	struct vstrm_h264_sei_streaming_v4 strm = {
-		.slice_mb_count = slice_mb_count,
-		.slice_mb_count_recovery_point = slice_mb_count_recovery_point,
+		.slice_mb_count = (uint16_t)slice_mb_count,
+		.slice_mb_count_recovery_point =
+			(uint16_t)slice_mb_count_recovery_point,
 	};
 	size_t len = vstrm_h264_sei_streaming_v4_get_size(&strm);
 	uint8_t *data = malloc(len);
@@ -857,13 +885,17 @@ int venc_h264_sei_add_user_data(struct h264_ctx *h264,
 int venc_h264_sei_write(struct h264_ctx *h264,
 			struct mbuf_coded_video_frame *frame)
 {
-	int res, count, err;
+	int res;
+	int count;
+	int err;
 	struct vdef_nalu nalu = {0};
 	struct mbuf_mem *mem = NULL;
 	void *void_data;
-	uint8_t *data, *start;
+	uint8_t *data;
+	uint8_t *start;
 	struct h264_bitstream bs;
-	size_t len, size;
+	size_t len;
+	size_t size;
 	struct vdef_coded_frame info;
 
 	ULOG_ERRNO_RETURN_ERR_IF(h264 == NULL, EINVAL);
@@ -936,16 +968,28 @@ int venc_h264_sei_write(struct h264_ctx *h264,
 	}
 
 	if (info.format.data_format == VDEF_CODED_DATA_FORMAT_AVCC) {
-		uint32_t sz = htonl(bs.off);
+		if (bs.off > UINT32_MAX) {
+			res = -E2BIG;
+			ULOG_ERRNO("invalid bs.off", -res);
+			goto out;
+		}
+		uint32_t sz = htonl((uint32_t)bs.off);
 		memcpy(start, &sz, 4);
 	}
+
+	if (nh.nal_ref_idc > UINT8_MAX) {
+		res = -E2BIG;
+		ULOG_ERRNO("invalid nh.nal_ref_idc", -res);
+		goto out;
+	}
+
 	size += bs.off;
 	nalu.h264.type = H264_NALU_TYPE_SEI;
 	nalu.h264.slice_type = H264_SLICE_TYPE_UNKNOWN;
 	nalu.h264.slice_mb_count = 0;
 	nalu.size = size;
 	nalu.importance = venc_h264_get_nalu_importance(
-		nalu.h264.type, nh.nal_ref_idc, info.type, info.layer);
+		nalu.h264.type, (uint8_t)nh.nal_ref_idc, info.type, info.layer);
 
 	res = mbuf_coded_video_frame_add_nalu(frame, mem, 0, &nalu);
 	if (res < 0) {
@@ -968,7 +1012,8 @@ int venc_h264_generate_nalus(struct venc_encoder *self,
 			     struct mbuf_coded_video_frame *frame,
 			     const struct vdef_coded_frame *info)
 {
-	int ret = 0, sei_count = 0;
+	int ret = 0;
+	int sei_count = 0;
 
 	/* AUD insertion */
 	if (self->config.h264.insert_aud) {
@@ -1083,7 +1128,7 @@ int venc_h264_format_convert(struct mbuf_coded_video_frame *frame,
 	int res = 0;
 	uint8_t *data;
 	uint32_t start_code = htonl(0x00000001);
-	const void *nalu_data;
+	void *nalu_data;
 	struct vdef_nalu nalu = {0};
 	int nalu_count;
 	struct vdef_coded_frame info;
@@ -1119,10 +1164,10 @@ int venc_h264_format_convert(struct mbuf_coded_video_frame *frame,
 	}
 
 	for (int i = 0; i < nalu_count; i++) {
-		res = mbuf_coded_video_frame_get_nalu(
+		res = mbuf_coded_video_frame_get_rw_nalu(
 			frame, i, &nalu_data, &nalu);
 		if (res < 0) {
-			ULOG_ERRNO("mbuf_coded_video_frame_get_nalu", -res);
+			ULOG_ERRNO("mbuf_coded_video_frame_get_rw_nalu", -res);
 			return res;
 		}
 		data = (uint8_t *)nalu_data;
@@ -1145,9 +1190,11 @@ int venc_h264_format_convert(struct mbuf_coded_video_frame *frame,
 			return res;
 		}
 
-		res = mbuf_coded_video_frame_release_nalu(frame, i, nalu_data);
+		res = mbuf_coded_video_frame_release_rw_nalu(
+			frame, i, nalu_data);
 		if (res < 0) {
-			ULOG_ERRNO("mbuf_coded_video_frame_release_nalu", -res);
+			ULOG_ERRNO("mbuf_coded_video_frame_release_rw_nalu",
+				   -res);
 			return res;
 		}
 	}

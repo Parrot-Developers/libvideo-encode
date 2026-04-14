@@ -59,6 +59,9 @@
 ULOG_DECLARE_TAG(ULOG_TAG);
 
 
+#define UNUSED(x) (void)(x)
+
+
 #define DEFAULT_IN_BUF_COUNT 30
 
 
@@ -114,11 +117,11 @@ static void finish_idle(void *userdata)
 	if (self->finishing)
 		return;
 
-	if ((s_stopping) || (self->input.finished)) {
+	if (s_stopping || self->input.finished) {
 		self->finishing = 1;
 
 		/* Flush the encoder */
-		res = venc_flush(self->encoder, (s_stopping) ? 1 : 0);
+		res = venc_flush(self->encoder, s_stopping ? 1 : 0);
 		if (res < 0)
 			ULOG_ERRNO("venc_flush", -res);
 	}
@@ -130,7 +133,8 @@ static void finish_idle(void *userdata)
 
 static int encode_frame(struct venc_prog *self)
 {
-	int res = 0, err;
+	int res = 0;
+	int err;
 	void *mem_data;
 	uint8_t *in_data;
 	size_t in_capacity;
@@ -199,8 +203,7 @@ static int encode_frame(struct venc_prog *self)
 	time_timespec_to_us(&cur_ts, &self->input.frame_info.info.timestamp);
 
 	frame_info.info.capture_timestamp =
-		(uint64_t)frame_info.info.timestamp * 1000000 /
-		frame_info.info.timescale;
+		frame_info.info.timestamp * 1000000 / frame_info.info.timescale;
 
 	res = mbuf_raw_video_frame_new(&frame_info, &in_frame);
 	if (res < 0) {
@@ -323,6 +326,8 @@ out:
 
 static void encoder_timer_cb(struct pomp_timer *timer, void *userdata)
 {
+	UNUSED(timer);
+
 	struct venc_prog *self = userdata;
 	int res;
 
@@ -361,6 +366,8 @@ static void encode_frame_idle(void *userdata)
 
 static void pool_event_cb(struct pomp_evt *evt, void *userdata)
 {
+	UNUSED(evt);
+
 	struct venc_prog *self = userdata;
 	int res;
 
@@ -411,8 +418,9 @@ static int frame_output(struct venc_prog *self,
 	const uint8_t *data;
 	const void *nalu_data;
 	struct vdef_nalu nalu;
-	size_t i;
-	uint64_t input_time, dequeue_time, output_time;
+	uint64_t input_time;
+	uint64_t dequeue_time;
+	uint64_t output_time;
 	size_t nalu_count;
 
 	if (self->input.waiting) {
@@ -452,7 +460,7 @@ static int frame_output(struct venc_prog *self,
 	case VDEF_CODED_DATA_FORMAT_BYTE_STREAM:
 	case VDEF_CODED_DATA_FORMAT_JFIF:
 	case VDEF_CODED_DATA_FORMAT_UNKNOWN:
-		for (i = 0; i < nalu_count; i++) {
+		for (size_t i = 0; i < nalu_count; i++) {
 			res = mbuf_coded_video_frame_get_nalu(
 				out_frame, i, &nalu_data, &nalu);
 			if (res < 0) {
@@ -509,6 +517,8 @@ static void frame_output_cb(struct venc_encoder *enc,
 			    struct mbuf_coded_video_frame *out_frame,
 			    void *userdata)
 {
+	UNUSED(enc);
+
 	struct venc_prog *self = userdata;
 	int res;
 
@@ -538,6 +548,8 @@ static void frame_output_cb(struct venc_encoder *enc,
 
 static void flush_cb(struct venc_encoder *enc, void *userdata)
 {
+	UNUSED(enc);
+
 	struct venc_prog *self = userdata;
 	int res;
 
@@ -555,6 +567,8 @@ static void flush_cb(struct venc_encoder *enc, void *userdata)
 
 static void stop_cb(struct venc_encoder *enc, void *userdata)
 {
+	UNUSED(enc);
+
 	struct venc_prog *self = userdata;
 
 	ULOG_ERRNO_RETURN_IF(self == NULL, EINVAL);
@@ -575,6 +589,8 @@ static const struct venc_cbs venc_cbs = {
 
 static void sighandler(int signum)
 {
+	UNUSED(signum);
+
 	printf("Stopping...\n");
 	s_stopping = 1;
 	if (s_loop != NULL) {
@@ -608,6 +624,7 @@ enum args_id {
 	ARGS_ID_MATRIX,
 	ARGS_ID_SAR,
 	ARGS_ID_MIN_BUF_COUNT,
+	ARGS_ID_OUTPUT_FORMAT,
 	ARGS_ID_INSERT_PIC_TIMING_SEI,
 	ARGS_ID_SET_NRI_BITS,
 };
@@ -654,6 +671,10 @@ static const struct option long_options[] = {
 	 required_argument,
 	 NULL,
 	 ARGS_ID_MIN_BUF_COUNT},
+	{"preferred-output-format",
+	 required_argument,
+	 NULL,
+	 ARGS_ID_OUTPUT_FORMAT},
 	{"insert-pic-timing-sei",
 	 no_argument,
 	 NULL,
@@ -702,6 +723,9 @@ static void usage(char *prog_name)
 		       "Encode at most n frames\n"
 	       "       --preferred-min-buf-count <n>   "
 		       "Prefered minimum input buffer count\n"
+	       "       --preferred-output-format <f>   "
+		       "Prefered output format (e.g. \"AVCC\", "
+		       "\"BYTE_STREAM\"; default is \"BYTE_STREAM\")\n"
 	       "  -l | --loop <dir>                    "
 		       "Loop forever, dir=1: loop from beginning, "
 		       "dir=-1: loop alternating forward/backward\n"
@@ -781,21 +805,27 @@ static void usage(char *prog_name)
 
 int main(int argc, char **argv)
 {
-	int res = 0, status = EXIT_SUCCESS;
-	int idx, c;
+	int res = 0;
+	int status = EXIT_SUCCESS;
+	int idx;
+	int c;
 	struct venc_prog *self;
-	char *input = NULL, *output = NULL;
+	char *input = NULL;
+	char *output = NULL;
 	struct vraw_reader_config reader_config;
 	struct venc_input_buffer_constraints constraints;
 	struct timespec cur_ts = {0, 0};
 	ssize_t res1;
 	size_t in_capacity;
-	uint64_t start_time = 0, end_time = 0;
+	uint64_t start_time = 0;
+	uint64_t end_time = 0;
 	int use_timer = 0;
 	int auto_implem_by_encoding = 0;
 	unsigned int profile = 0; /* TODO */
 	unsigned int level = 0; /* TODO */
 	enum venc_rate_control rate_control = VENC_RATE_CONTROL_CBR;
+	enum vdef_coded_data_format output_format =
+		VDEF_CODED_DATA_FORMAT_BYTE_STREAM;
 	unsigned int min_qp = 0;
 	unsigned int max_qp = 0;
 	unsigned int qp = 0;
@@ -1038,6 +1068,10 @@ int main(int argc, char **argv)
 			sscanf(optarg, "%u", &preferred_min_buf_count);
 			break;
 
+		case ARGS_ID_OUTPUT_FORMAT:
+			output_format = vdef_coded_data_format_from_str(optarg);
+			break;
+
 		case ARGS_ID_INSERT_PIC_TIMING_SEI:
 			insert_pic_timing_sei = 1;
 			break;
@@ -1108,16 +1142,17 @@ int main(int argc, char **argv)
 			memcpy(reader_config.plane_stride_align,
 			       constraints.plane_stride_align,
 			       plane_count *
-				       sizeof(*constraints.plane_stride_align));
+				       sizeof(constraints
+						      .plane_stride_align[0]));
 			memcpy(reader_config.plane_scanline_align,
 			       constraints.plane_scanline_align,
 			       plane_count *
-				       sizeof(*constraints
-						       .plane_scanline_align));
+				       sizeof(constraints.plane_scanline_align
+						      [0]));
 			memcpy(reader_config.plane_size_align,
 			       constraints.plane_size_align,
 			       plane_count *
-				       sizeof(*constraints.plane_size_align));
+				       sizeof(constraints.plane_size_align[0]));
 		}
 
 		if ((strlen(input) > 4) &&
@@ -1183,8 +1218,7 @@ int main(int argc, char **argv)
 		printf("Output: file '%s'\n", output);
 	}
 	self->output.encoding = self->config.encoding;
-	self->config.output.preferred_format =
-		VDEF_CODED_DATA_FORMAT_BYTE_STREAM;
+	self->config.output.preferred_format = output_format;
 
 	if (self->input.decimation == 0)
 		self->input.decimation = 1;

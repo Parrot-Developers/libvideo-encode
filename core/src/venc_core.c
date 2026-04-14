@@ -44,6 +44,8 @@ enum venc_encoder_implem venc_encoder_implem_from_str(const char *str)
 		return VENC_ENCODER_IMPLEM_QCOM;
 	else if (strcasecmp(str, "QCOM_JPEG") == 0)
 		return VENC_ENCODER_IMPLEM_QCOM_JPEG;
+	else if (strcasecmp(str, "MEDIACODEC") == 0)
+		return VENC_ENCODER_IMPLEM_MEDIACODEC;
 	else if (strcasecmp(str, "FAKEH264") == 0)
 		return VENC_ENCODER_IMPLEM_FAKEH264;
 	else if (strcasecmp(str, "FFMPEG") == 0)
@@ -72,6 +74,8 @@ const char *venc_encoder_implem_to_str(enum venc_encoder_implem implem)
 		return "QCOM";
 	case VENC_ENCODER_IMPLEM_QCOM_JPEG:
 		return "QCOM_JPEG";
+	case VENC_ENCODER_IMPLEM_MEDIACODEC:
+		return "MEDIACODEC";
 	case VENC_ENCODER_IMPLEM_FAKEH264:
 		return "FAKEH264";
 	case VENC_ENCODER_IMPLEM_FFMPEG:
@@ -196,21 +200,25 @@ void venc_call_frame_output_cb(struct venc_encoder *base,
 }
 
 
-void venc_call_flush_cb(struct venc_encoder *base)
+void venc_call_flush_cb(struct venc_encoder *self)
 {
-	if (!base->cbs.flush)
+	if (!self->cbs.flush)
 		return;
 
-	base->cbs.flush(base, base->userdata);
+	VENC_LOGI("encoder is %s", self->flush_discard ? "flushed" : "drained");
+
+	self->cbs.flush(self, self->userdata);
 }
 
 
-void venc_call_stop_cb(struct venc_encoder *base)
+void venc_call_stop_cb(struct venc_encoder *self)
 {
-	if (!base->cbs.stop)
+	if (!self->cbs.stop)
 		return;
 
-	base->cbs.stop(base, base->userdata);
+	VENC_LOGI("encoder is stopped");
+
+	self->cbs.stop(self, self->userdata);
 }
 
 
@@ -239,8 +247,8 @@ void venc_call_pre_release_cb(struct venc_encoder *base,
 
 int venc_count_unreleased_frames(struct venc_encoder *base)
 {
-	return (int)atomic_load(&base->counters.released) -
-	       (int)atomic_load(&base->counters.out);
+	return (int)atomic_load(&base->counters.out) -
+	       (int)atomic_load(&base->counters.released);
 }
 
 
@@ -274,12 +282,14 @@ bool venc_default_input_filter(struct mbuf_raw_video_frame *frame,
 
 
 bool venc_default_input_filter_internal(
-	struct venc_encoder *encoder,
-	struct mbuf_raw_video_frame *frame,
-	struct vdef_raw_frame *frame_info,
+	const struct venc_encoder *encoder,
+	const struct mbuf_raw_video_frame *frame,
+	const struct vdef_raw_frame *frame_info,
 	const struct vdef_raw_format *supported_formats,
 	unsigned int nb_supported_formats)
 {
+	UNUSED(frame);
+
 	if (!vdef_raw_format_intersect(&frame_info->format,
 				       supported_formats,
 				       nb_supported_formats)) {
@@ -331,7 +341,7 @@ bool venc_default_input_filter_internal(
 void venc_default_input_filter_internal_confirm_frame(
 	struct venc_encoder *encoder,
 	struct mbuf_raw_video_frame *frame,
-	struct vdef_raw_frame *frame_info)
+	const struct vdef_raw_frame *frame_info)
 {
 	int err;
 	uint64_t ts_us;
@@ -386,7 +396,8 @@ int venc_copy_raw_frame_as_metadata(struct mbuf_raw_video_frame *frame,
 				    struct mbuf_mem *mem,
 				    struct mbuf_raw_video_frame **ret_obj)
 {
-	int ret = 0, err;
+	int ret = 0;
+	int err;
 	unsigned int plane_count = 0;
 	struct vdef_raw_frame info;
 	struct vmeta_frame *metadata = NULL;
@@ -450,10 +461,10 @@ int venc_copy_raw_frame_as_metadata(struct mbuf_raw_video_frame *frame,
 	*ret_obj = meta_frame;
 
 failure:
-	if ((ret < 0) && (meta_frame)) {
+	if ((ret < 0) && meta_frame) {
 		err = mbuf_raw_video_frame_unref(meta_frame);
 		if (err < 0)
-			ULOG_ERRNO("mbuf_raw_video_frame_unref", -ret);
+			ULOG_ERRNO("mbuf_raw_video_frame_unref", -err);
 	}
 
 	return ret;

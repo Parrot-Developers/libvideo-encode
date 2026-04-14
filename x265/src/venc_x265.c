@@ -69,7 +69,8 @@ static void call_stop_done(void *userdata)
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct venc_x265 *self = userdata;
-	int ret, err;
+	int ret;
+	int err;
 	char message;
 
 	do {
@@ -154,7 +155,8 @@ static void enc_out_queue_evt_cb(struct pomp_evt *evt, void *userdata)
 static int generate_ps(struct venc_x265 *self)
 {
 	int ret;
-	uint32_t i, nalu_count = 0;
+	uint32_t i;
+	uint32_t nalu_count = 0;
 	x265_nal *nalu = NULL;
 	size_t len;
 
@@ -265,7 +267,8 @@ static int add_x265_nalus(struct venc_x265 *self,
 			  x265_nal *nalu,
 			  size_t nalu_count)
 {
-	int res, err;
+	int res;
+	int err;
 	size_t i;
 	struct mbuf_mem *nalus_mem;
 	void *nalu_data;
@@ -273,7 +276,8 @@ static int add_x265_nalus(struct venc_x265 *self,
 	size_t mem_size = 0;
 	size_t nalu_offset = 4;
 	size_t nalu_len = 0;
-	size_t offset = 0, base_offset;
+	size_t offset = 0;
+	size_t base_offset;
 	struct vdef_nalu out_nalu = {0};
 
 	for (i = 0; i < nalu_count; i++)
@@ -432,7 +436,8 @@ static void frame_release(struct mbuf_coded_video_frame *frame, void *userdata)
 static int encode_frame(struct venc_x265 *self,
 			struct mbuf_raw_video_frame *in_frame)
 {
-	int ret, err;
+	int ret;
+	int err;
 	uint32_t nalu_count = 0;
 	int frame_size = 0;
 	x265_nal *nalu = NULL;
@@ -440,8 +445,9 @@ static int encode_frame(struct venc_x265 *self,
 	struct vdef_raw_frame info;
 	const void *plane_data;
 	const uint8_t *in_data;
-	size_t len, nalu_len = 0, nalu_offset = 4;
-	ssize_t i;
+	size_t len;
+	size_t nalu_len = 0;
+	size_t nalu_offset = 4;
 	struct mbuf_raw_video_frame *enc_frame = NULL;
 	struct mbuf_coded_video_frame *out_frame = NULL;
 	struct vdef_coded_frame out_info = {};
@@ -490,12 +496,10 @@ static int encode_frame(struct venc_x265 *self,
 		if (vdef_raw_format_cmp(&info.format, &vdef_gray)) {
 			plane_count = 1;
 			/* Add the dummy plane */
-			self->in_picture.planes[1] =
-				(uint8_t *)self->dummy_uv_plane;
+			self->in_picture.planes[1] = self->dummy_uv_plane;
 			self->in_picture.stride[1] =
 				self->dummy_uv_plane_stride;
-			self->in_picture.planes[2] =
-				(uint8_t *)self->dummy_uv_plane;
+			self->in_picture.planes[2] = self->dummy_uv_plane;
 			self->in_picture.stride[2] =
 				self->dummy_uv_plane_stride;
 		} else if (vdef_raw_format_cmp(&info.format, &vdef_i420) ||
@@ -626,7 +630,7 @@ static int encode_frame(struct venc_x265 *self,
 		out_info.type = VDEF_CODED_FRAME_TYPE_NOT_CODED;
 
 	self->recovery_point = false;
-	for (i = 0; i < nalu_count; i++) {
+	for (unsigned int i = 0; i < nalu_count; i++) {
 		if ((*(nalu[i].payload + nalu_offset) & 0x3F) !=
 		    H265_NALU_TYPE_PREFIX_SEI_NUT) {
 			continue;
@@ -751,7 +755,8 @@ static int complete_flush(struct venc_x265 *self)
 
 static void check_input_queue(struct venc_x265 *self)
 {
-	int ret, err = 0;
+	int ret;
+	int err = 0;
 	int frame_size = 0;
 	struct mbuf_raw_video_frame *in_frame;
 
@@ -836,7 +841,8 @@ static void input_event_cb(struct pomp_evt *evt, void *userdata)
 
 static void *encoder_thread(void *ptr)
 {
-	int ret, timeout;
+	int ret;
+	int timeout;
 	struct venc_x265 *self = ptr;
 	struct pomp_loop *loop = NULL;
 	struct pomp_evt *in_queue_evt = NULL;
@@ -926,6 +932,8 @@ static int get_supported_encodings(const enum vdef_encoding **encodings)
 static int get_supported_input_formats(enum vdef_encoding encoding,
 				       const struct vdef_raw_format **formats)
 {
+	UNUSED(encoding);
+
 	(void)pthread_once(&supported_formats_is_init,
 			   initialize_supported_formats);
 	*formats = supported_formats;
@@ -936,7 +944,8 @@ static int get_supported_input_formats(enum vdef_encoding encoding,
 static int copy_implem_cfg(const struct venc_config_impl *impl_cfg,
 			   struct venc_config_impl **ret_obj)
 {
-	struct venc_config_x265 *specific = (struct venc_config_x265 *)impl_cfg;
+	const struct venc_config_x265 *specific =
+		(const struct venc_config_x265 *)impl_cfg;
 	struct venc_config_x265 *copy = NULL;
 	ULOG_ERRNO_RETURN_ERR_IF(specific == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(ret_obj == NULL, EINVAL);
@@ -1085,8 +1094,6 @@ static int destroy(struct venc_encoder *base)
 static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 {
 	int ret;
-	const void *tmp;
-	size_t tmplen;
 	struct vdef_raw_frame info;
 	struct venc_x265 *self = userdata;
 
@@ -1110,14 +1117,6 @@ static bool input_filter(struct mbuf_raw_video_frame *frame, void *userdata)
 						NB_SUPPORTED_FORMATS))
 		return false;
 
-	/* Input frame must be packed */
-	ret = mbuf_raw_video_frame_get_packed_buffer(frame, &tmp, &tmplen);
-	if (ret != 0) {
-		VENC_LOG_ERRNO("mbuf_raw_video_frame_get_packed_buffer", -ret);
-		return false;
-	}
-	mbuf_raw_video_frame_release_packed_buffer(frame, tmp);
-
 	venc_default_input_filter_internal_confirm_frame(
 		self->base, frame, &info);
 
@@ -1130,6 +1129,10 @@ static void sei_recovery_point_cb(struct h265_ctx *ctx,
 				  const struct h265_sei_recovery_point *sei,
 				  void *userdata)
 {
+	UNUSED(ctx);
+	UNUSED(buf);
+	UNUSED(len);
+
 	struct venc_x265 *self = userdata;
 
 	self->base->recovery_frame_cnt = sei->recovery_poc_cnt;
@@ -1472,6 +1475,8 @@ error:
 
 static struct mbuf_pool *get_input_buffer_pool(struct venc_encoder *base)
 {
+	UNUSED(base);
+
 	/* No input buffer pool allocated: use the application's */
 	return NULL;
 }
@@ -1504,7 +1509,8 @@ static int get_dyn_config(struct venc_encoder *base,
 static int set_dyn_config(struct venc_encoder *base,
 			  const struct venc_dyn_config *config)
 {
-	int ret, update_config = 0;
+	int ret;
+	int update_config = 0;
 	x265_param *x265_params = NULL;
 	struct venc_x265 *self;
 
