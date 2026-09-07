@@ -1432,6 +1432,25 @@ static int buffer_push_one(struct venc_videotoolbox *self,
 		VENC_LOGW_ERRNO("mbuf_raw_video_frame_add_ancillary_buffer",
 				-err);
 
+	osstatus =
+		VTCompressionSessionPrepareToEncodeFrames(self->compress_ref);
+	if (osstatus == kVTInvalidSessionErr) {
+		VENC_LOGI("VT session invalid, renewing...");
+		ret = compression_session_renew(self);
+		if (ret < 0) {
+			ret = -EIO;
+			VENC_LOG_ERRNO("compression_session_renew", -ret);
+			goto out;
+		}
+	} else if (osstatus != noErr) {
+		ret = -EPROTO;
+		VENC_LOG_ERRNO(
+			"VTCompressionSessionPrepareToEncodeFrames status=%d",
+			-ret,
+			(int)osstatus);
+		goto out;
+	}
+
 	if (vdef_raw_format_cmp(&info.format, &vdef_opaque)) {
 		struct mbuf_mem_info info = {};
 		ret = mbuf_raw_video_frame_get_plane_mem_info(
@@ -1484,35 +1503,9 @@ static int buffer_push_one(struct venc_videotoolbox *self,
 
 	pool = VTCompressionSessionGetPixelBufferPool(self->compress_ref);
 	if (pool == NULL) {
-		osstatus = VTCompressionSessionPrepareToEncodeFrames(
-			self->compress_ref);
-		if (osstatus == kVTInvalidSessionErr) {
-			ret = compression_session_renew(self);
-			if (ret < 0) {
-				ret = -EIO;
-				VENC_LOG_ERRNO("compression_session_renew",
-					       -ret);
-				goto out;
-			}
-			pool = VTCompressionSessionGetPixelBufferPool(
-				self->compress_ref);
-			if (pool == NULL) {
-				ret = -EPROTO;
-				VENC_LOG_ERRNO(
-					"VTCompressionSessionGetPixelBufferPool",
-					-ret);
-				goto out;
-			} else {
-				VENC_LOGI(
-					"VT session restarted because of a "
-					"kVTInvalidSessionErr error");
-			}
-		} else {
-			ret = -EPROTO;
-			VENC_LOG_ERRNO("VTCompressionSessionGetPixelBufferPool",
-				       -ret);
-			goto out;
-		}
+		ret = -EPROTO;
+		VENC_LOG_ERRNO("VTCompressionSessionGetPixelBufferPool", -ret);
+		goto out;
 	}
 
 	ret = CVPixelBufferPoolCreatePixelBuffer(NULL, pool, &pix_buf);

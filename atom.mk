@@ -294,3 +294,51 @@ endif
 
 include $(BUILD_EXECUTABLE)
 endif
+
+ifdef TARGET_TEST
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := tst-libvideo-encode
+LOCAL_CFLAGS += -DTARGET_TEST -D_GNU_SOURCE
+# Mirrors the BUILD_LIBVIDEO_ENCODE_<NAME> macros Alchemy auto-derives for
+# libvideo-encode's own LOCAL_CONDITIONAL_LIBRARIES (src/venc_priv.h): this
+# test module links these backends directly (not through that conditional
+# mechanism), so the same defines have to be set by hand from the identical
+# CONFIG_VENC_<NAME> Kconfig booleans, already loaded earlier in this file.
+# Needed so tests/venc_test_config.c can conditionally #include each
+# backend's implementation-specific config header (venc_x264.h/venc_x265.h/
+# venc_ffmpeg.h) only when that backend is actually part of the build -
+# otherwise the header (only exported transitively when its backend is
+# linked into libvideo-encode) is missing and the build fails.
+ifeq ("$(CONFIG_VENC_X264)","y")
+LOCAL_CFLAGS += -DBUILD_LIBVIDEO_ENCODE_X264
+endif
+ifeq ("$(CONFIG_VENC_X265)","y")
+LOCAL_CFLAGS += -DBUILD_LIBVIDEO_ENCODE_X265
+endif
+ifeq ("$(CONFIG_VENC_FFMPEG)","y")
+LOCAL_CFLAGS += -DBUILD_LIBVIDEO_ENCODE_FFMPEG
+endif
+LOCAL_SRC_FILES := \
+	tests/venc_test.c \
+	tests/venc_test_core.c \
+	tests/venc_test_h264.c \
+	tests/venc_test_h265.c \
+	tests/venc_test_config.c \
+	tests/venc_test_lifecycle.c
+LOCAL_LIBRARIES := \
+	libcunit \
+	libvideo-encode \
+	libvideo-encode-core \
+	libh264 \
+	libh265 \
+	libpomp \
+	libulog \
+	libvideo-defs \
+	libmedia-buffers \
+	libmedia-buffers-memory \
+	libmedia-buffers-memory-generic \
+	libvideo-metadata
+include $(BUILD_EXECUTABLE)
+
+endif

@@ -149,10 +149,12 @@ struct venc_ffmpeg {
 	atomic_bool insert_idr;
 	atomic_bool update_bitrate;
 	atomic_bool should_stop;
+	atomic_bool stopping;
 
 	atomic_bool flush_requested;
 	atomic_bool flushing;
 	atomic_bool flush_discard;
+	atomic_bool reopen_needed;
 
 	struct mbox *mbox;
 	bool ps_ready;

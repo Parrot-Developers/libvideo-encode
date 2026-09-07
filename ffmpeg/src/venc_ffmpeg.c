@@ -54,6 +54,10 @@ ULOG_DECLARE_TAG(ULOG_TAG);
 	MAKE_BACKEND(enum_id, name, false, encoding)
 
 
+/* Forward declarations */
+static int reopen_encoder(struct venc_ffmpeg *self);
+
+
 /* Backends are sorted by priority, with HW-encoders first */
 static struct venc_ffmpeg_backend s_backend_map[] = {
 	/* HW-encoders */
@@ -91,7 +95,6 @@ static int ensure_backend_is_supported(struct venc_ffmpeg_backend *backend)
 {
 	int ret;
 	ULOG_ERRNO_RETURN_ERR_IF(backend == NULL, EINVAL);
-	ULOG_ERRNO_RETURN_ERR_IF(backend->codec->pix_fmts == NULL, EPROTO);
 
 	if (backend->is_tested)
 		return 0;
@@ -106,7 +109,20 @@ static int ensure_backend_is_supported(struct venc_ffmpeg_backend *backend)
 	ctx->height = 720;
 	ctx->time_base = (AVRational){1, 30};
 	ctx->framerate = (AVRational){30, 1};
-	ctx->pix_fmt = backend->codec->pix_fmts[0];
+	const enum AVPixelFormat *pix_fmts = NULL;
+	int num_pix_fmts = 0;
+	(void)avcodec_get_supported_config(NULL,
+					   backend->codec,
+					   AV_CODEC_CONFIG_PIX_FORMAT,
+					   0,
+					   (const void **)&pix_fmts,
+					   &num_pix_fmts);
+	if (num_pix_fmts < 1 || pix_fmts[0] == AV_PIX_FMT_NONE) {
+		ret = -EPROTO;
+		ULOG_ERRNO("avcodec_get_supported_config", -ret);
+		goto out;
+	}
+	ctx->pix_fmt = pix_fmts[0];
 	ret = avcodec_open2(ctx, backend->codec, NULL);
 	if (ret < 0) {
 		char errbuf[256];
@@ -115,6 +131,8 @@ static int ensure_backend_is_supported(struct venc_ffmpeg_backend *backend)
 	} else {
 		backend->is_supported = true;
 	}
+
+out:
 	avcodec_free_context(&ctx);
 	backend->is_tested = true;
 	return 0;
@@ -207,13 +225,20 @@ static void initialize_supported_formats(void)
 		if (backend == NULL)
 			continue;
 		/* Fill implem input formats */
-		for (const enum AVPixelFormat *p = backend->codec->pix_fmts;
-		     *p != AV_PIX_FMT_NONE;
-		     p++) {
-			if (p == NULL)
+		const enum AVPixelFormat *pix_fmts = NULL;
+		int num_pix_fmts = 0;
+		(void)avcodec_get_supported_config(NULL,
+						   backend->codec,
+						   AV_CODEC_CONFIG_PIX_FORMAT,
+						   0,
+						   (const void **)&pix_fmts,
+						   &num_pix_fmts);
+		for (int i = 0; i < num_pix_fmts; i++) {
+			enum AVPixelFormat p = pix_fmts[i];
+			if (p == AV_PIX_FMT_NONE)
 				break;
 			const struct vdef_raw_format *format =
-				format_from_av_pixel_format(*p);
+				format_from_av_pixel_format(p);
 			if ((format != NULL) &&
 			    !backend_has_format(backend, format)) {
 				backend->supported_formats
@@ -290,11 +315,23 @@ static void mbox_cb(int fd, uint32_t revents, void *userdata)
 					       -err);
 			break;
 		case VENC_MSG_STOP:
-			err = pomp_loop_idle_add_with_cookie(
-				self->base->loop, call_stop_done, self, self);
-			if (err < 0)
-				VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie",
-					       -err);
+			if ((venc_count_unreleased_frames(self->base) == 0)) {
+				err = pomp_loop_idle_add_with_cookie(
+					self->base->loop,
+					call_stop_done,
+					self,
+					self);
+				if (err < 0) {
+					VENC_LOG_ERRNO(
+						"pomp_loop_idle_add_"
+						"with_cookie",
+						-err);
+				} else {
+					atomic_store(&self->stopping, false);
+				}
+			} else {
+				atomic_store(&self->stopping, true);
+			}
 			break;
 		default:
 			VENC_LOGE("unknown message: %c", message);
@@ -860,7 +897,18 @@ static int parse_buffer(struct venc_ffmpeg *self,
 static void frame_release(struct mbuf_coded_video_frame *frame, void *userdata)
 {
 	struct venc_ffmpeg *self = userdata;
+
 	venc_call_pre_release_cb(self->base, frame);
+
+	if (atomic_load(&self->stopping) &&
+	    (venc_count_unreleased_frames(self->base) == 0)) {
+		int err = pomp_loop_idle_add_with_cookie(
+			self->base->loop, call_stop_done, self, self);
+		if (err < 0)
+			VENC_LOG_ERRNO("pomp_loop_idle_add_with_cookie", -err);
+		else
+			atomic_store(&self->stopping, false);
+	}
 }
 
 
@@ -1055,7 +1103,12 @@ static void venc_ffmpeg_complete_flush(struct venc_ffmpeg *self)
 	if (ret < 0)
 		VENC_LOG_ERRNO("mbuf_raw_video_frame_queue_flush:enc", -ret);
 
-	avcodec_flush_buffers(self->avcodec);
+	/* Mark the codec for reopen on the next real frame: avcodec_flush_
+	 * buffers() is a no-op for codecs that don't implement AVCodec.flush
+	 * (e.g. libopenh264), and after avcodec_send_frame(NULL) the codec is
+	 * in EOF state and rejects further input. Reopening mirrors x264's
+	 * reopen_encoder() pattern and works for all codecs. */
+	atomic_store(&self->reopen_needed, true);
 	atomic_store(&self->flushing, false);
 	atomic_store(&self->flush_discard, false);
 
@@ -1421,6 +1474,16 @@ static void check_input_queue(struct venc_ffmpeg *self)
 
 	ret = mbuf_raw_video_frame_queue_peek(self->in_queue, &frame);
 	while (ret == 0) {
+		/* Reopen the codec after a drain flush before encoding again.
+		 * Mirrors x264's reopen_encoder check in its encoding loop. */
+		if (atomic_load(&self->reopen_needed)) {
+			int err = reopen_encoder(self);
+			if (err < 0) {
+				VENC_LOG_ERRNO("reopen_encoder", -err);
+				break;
+			}
+		}
+
 		/* Frame skipping in case of decimation */
 		if (atomic_load(&self->base->counters.pushed) %
 			    self->dynconf.decimation !=
@@ -1892,21 +1955,167 @@ venc_set_av_opt(struct venc_ffmpeg *self, const char *key, const char *value)
 }
 
 
+/* Apply all AVCodecContext parameters to self->avcodec. Called both from
+ * create() on initial open and from reopen_encoder() after a drain flush.
+ * Requires: self->attrs is already populated (by configure_attributes_h264/
+ * h265), self->backend and self->input_format are set. */
+static void configure_avcodec(struct venc_ffmpeg *self)
+{
+	struct venc_encoder *base = self->base;
+	struct venc_config_ffmpeg *specific =
+		(struct venc_config_ffmpeg *)base->config.implem_cfg;
+	const char *preset =
+		(specific && specific->preset) ? specific->preset : "p4";
+	const char *tune = (specific && specific->tune) ? specific->tune : "ll";
+	enum AVPixelFormat pix_fmt =
+		format_to_av_pixel_format(&self->input_format);
+	unsigned int min_qp = FUTILS_MAX(VENC_FFMPEG_MIN_QP, 1);
+	unsigned int max_qp = FUTILS_MIN(VENC_FFMPEG_MAX_QP, 51);
+
+	self->avcodec->pix_fmt = pix_fmt;
+	/* Place global headers in extradata instead of every keyframe. */
+	self->avcodec->flags = AV_CODEC_FLAG_GLOBAL_HEADER;
+	self->avcodec->codec_type = AVMEDIA_TYPE_VIDEO;
+	self->avcodec->thread_type = FF_THREAD_SLICE;
+	switch (base->config.preferred_thread_count) {
+	case 1:
+		self->avcodec->thread_count = 1;
+		self->avcodec->thread_type &= ~FF_THREAD_FRAME;
+		break;
+	case 0:
+		self->avcodec->thread_count = VENC_FFMPEG_DEFAULT_THREAD_COUNT;
+		break;
+	default:
+		self->avcodec->thread_count =
+			base->config.preferred_thread_count;
+		break;
+	}
+
+	venc_set_av_opt(self, "profile", self->attrs.profile_str);
+	venc_set_av_opt(self, "level", self->attrs.level_str);
+
+	switch (self->backend->type) {
+	case VENC_FFMPEG_BACKEND_TYPE_OPENH264:
+		venc_set_av_opt_int(self, "allow_skip_frames", 0);
+		break;
+	case VENC_FFMPEG_BACKEND_TYPE_H264_NVENC:
+	case VENC_FFMPEG_BACKEND_TYPE_HEVC_NVENC:
+		venc_set_av_opt(self, "preset", preset);
+		venc_set_av_opt(self, "tune", tune);
+		venc_set_av_opt_int(self, "forced-idr", 1);
+		venc_set_av_opt_int(self, "nonref_p", 1);
+		venc_set_av_opt(self, "b_ref_mode", "disabled");
+		venc_set_av_opt_int(
+			self, "intra-refresh", !!self->attrs.use_intra_refresh);
+		break;
+	default:
+		break;
+	}
+
+	self->avcodec->width = base->config.input.info.resolution.width;
+	self->avcodec->height = base->config.input.info.resolution.height;
+	self->avcodec->time_base.num = self->avcodec->framerate.num =
+		base->config.input.info.framerate.num;
+	self->avcodec->time_base.den = self->avcodec->framerate.den =
+		base->config.input.info.framerate.den;
+	self->avcodec->max_b_frames = 0;
+	self->avcodec->gop_size = self->avcodec->keyint_min = self->attrs.gop;
+
+	switch (base->config.encoding) {
+	case VDEF_ENCODING_H264:
+		self->avcodec->slices =
+			base->config.h264.slice_size_mbrows > 0
+				? (base->mb_height /
+				   base->config.h264.slice_size_mbrows)
+				: 0;
+		venc_set_av_opt(self, "coder", self->attrs.coder_str);
+		break;
+	case VDEF_ENCODING_H265:
+	default:
+		break;
+	}
+
+	venc_set_av_opt(self, self->attrs.rc_key_str, self->attrs.rc_val_str);
+
+	switch (self->attrs.rc) {
+	default:
+	case VENC_RATE_CONTROL_CBR:
+	case VENC_RATE_CONTROL_VBR:
+		self->avcodec->rc_max_rate = self->attrs.max_bitrate;
+		self->avcodec->bit_rate = self->attrs.target_bitrate;
+		break;
+	case VENC_RATE_CONTROL_CQ:
+		venc_set_av_opt_int(self, "qp", self->attrs.qp);
+		break;
+	}
+
+	if (self->attrs.min_qp != 0 || self->attrs.max_qp != 0) {
+		min_qp = FUTILS_MAX(min_qp, self->attrs.min_qp);
+		max_qp = FUTILS_MIN(max_qp, self->attrs.max_qp);
+	}
+
+	self->avcodec->qmin = min_qp;
+	self->avcodec->qmax = max_qp;
+}
+
+
+/* Close and reopen the AVCodecContext after a drain flush. Mirrors x264's
+ * reopen_encoder(): x264_encoder_close+x264_encoder_open. Needed because
+ * libopenh264 (and some other codecs) do not implement AVCodec.flush, so
+ * avcodec_flush_buffers() is a no-op and avcodec_send_frame() returns EINVAL
+ * on the second batch of frames. */
+static int reopen_encoder(struct venc_ffmpeg *self)
+{
+	int ret;
+
+	if (!atomic_load(&self->reopen_needed))
+		return 0;
+
+	VENC_LOGI("reopening encoder");
+
+	avcodec_free_context(&self->avcodec);
+
+	self->avcodec = avcodec_alloc_context3(self->backend->codec);
+	if (self->avcodec == NULL) {
+		VENC_LOG_ERRNO("avcodec_alloc_context3", ENOMEM);
+		return -ENOMEM;
+	}
+
+	configure_avcodec(self);
+
+	ret = avcodec_open2(self->avcodec, NULL, NULL);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("avcodec_open2", -ret);
+		avcodec_free_context(&self->avcodec);
+		return ret;
+	}
+
+	/* Re-read SPS/PPS from the fresh extradata. ps_ready must be cleared
+	 * first so save_ps() doesn't short-circuit. init_h264_writer() guards
+	 * on h264.ctx != NULL and won't re-run if the context already exists
+	 * (same parameters -> same SPS/PPS). */
+	self->ps_ready = false;
+	ret = save_ps(
+		self, self->avcodec->extradata, self->avcodec->extradata_size);
+	if (ret < 0) {
+		VENC_LOG_ERRNO("save_ps", -ret);
+		return ret;
+	}
+
+	atomic_store(&self->reopen_needed, false);
+	return 0;
+}
+
+
 static int create(struct venc_encoder *base)
 {
 	int ret = 0;
 	struct venc_ffmpeg *self = NULL;
 	unsigned int ver = avcodec_version();
-	struct venc_config_ffmpeg *specific = NULL;
-	const char *preset = NULL;
-	const char *tune = NULL;
-	enum AVPixelFormat pix_fmt = AV_PIX_FMT_NONE;
 	bool found = false;
 	struct mbuf_raw_video_frame_queue_args queue_args = {
 		.filter = input_filter,
 	};
-	unsigned int min_qp = FUTILS_MAX(VENC_FFMPEG_MIN_QP, 1);
-	unsigned int max_qp = FUTILS_MIN(VENC_FFMPEG_MAX_QP, 51);
 
 	VENC_LOG_ERRNO_RETURN_ERR_IF(base == NULL, EINVAL);
 
@@ -1946,14 +2155,20 @@ static int create(struct venc_encoder *base)
 		return ret;
 	}
 
-	specific = (struct venc_config_ffmpeg *)venc_config_get_specific(
-		&base->config, VENC_ENCODER_IMPLEM_FFMPEG);
-
 	self = calloc(1, sizeof(*self));
 	if (self == NULL)
 		return -ENOMEM;
 	self->base = base;
 	base->derived = self;
+
+	/* Unlike x264/x265, this backend never defaulted UNKNOWN to
+	 * BYTE_STREAM here, so a caller leaving it UNKNOWN (legal per the
+	 * validation above) got that value baked into every output frame,
+	 * which vdef_is_coded_format_valid() rejects for H264/H265. */
+	if (base->config.output.preferred_format ==
+	    VDEF_CODED_DATA_FORMAT_UNKNOWN)
+		base->config.output.preferred_format =
+			VDEF_CODED_DATA_FORMAT_BYTE_STREAM;
 
 	queue_args.filter_userdata = self;
 
@@ -2004,8 +2219,11 @@ static int create(struct venc_encoder *base)
 	}
 
 	if (vdef_raw_format_cmp(&base->config.input.format, &vdef_gray)) {
-		/* Override vdef_gray format (unsupported) */
-		self->input_format = self->backend->supported_formats[1];
+		/* Override vdef_gray format (unsupported): use the first native
+		 * format (index 0). gray is always appended last in
+		 * initialize_supported_formats(), so [0] is guaranteed to be a
+		 * real pixel format even when the codec only supports one. */
+		self->input_format = self->backend->supported_formats[0];
 
 		if (vdef_raw_format_cmp(&self->input_format, &vdef_i420)) {
 			self->dummy_uv_plane.count = 2;
@@ -2038,102 +2256,7 @@ static int create(struct venc_encoder *base)
 		self->input_format = base->config.input.format;
 	}
 
-	pix_fmt = format_to_av_pixel_format(&self->input_format);
-
-	preset = (specific && specific->preset) ? specific->preset : "p4";
-	tune = (specific && specific->tune) ? specific->tune : "ll";
-
-	self->avcodec->pix_fmt = pix_fmt;
-	/* Place global headers in extradata instead of every keyframe. */
-	self->avcodec->flags = AV_CODEC_FLAG_GLOBAL_HEADER;
-	self->avcodec->codec_type = AVMEDIA_TYPE_VIDEO;
-	self->avcodec->thread_type = FF_THREAD_SLICE;
-	switch (base->config.preferred_thread_count) {
-	case 1:
-		self->avcodec->thread_count = 1;
-		self->avcodec->thread_type &= ~FF_THREAD_FRAME;
-		break;
-	case 0:
-		self->avcodec->thread_count = VENC_FFMPEG_DEFAULT_THREAD_COUNT;
-		break;
-	default:
-		self->avcodec->thread_count =
-			base->config.preferred_thread_count;
-		break;
-	}
-
-	venc_set_av_opt(self, "profile", self->attrs.profile_str);
-	venc_set_av_opt(self, "level", self->attrs.level_str);
-
-	switch (self->backend->type) {
-	case VENC_FFMPEG_BACKEND_TYPE_OPENH264: {
-		/* OpenH264-specific params */
-		venc_set_av_opt_int(self, "allow_skip_frames", 0);
-		break;
-	}
-	case VENC_FFMPEG_BACKEND_TYPE_H264_NVENC:
-	case VENC_FFMPEG_BACKEND_TYPE_HEVC_NVENC: {
-		/* TODO: NVENC-specific params */
-		venc_set_av_opt(self, "preset", preset);
-		venc_set_av_opt(self, "tune", tune);
-		/* If forcing keyframes, force them as IDR frames (needed for
-		 * request IDR API) */
-		venc_set_av_opt_int(self, "forced-idr", 1);
-		venc_set_av_opt_int(self, "nonref_p", 1);
-		venc_set_av_opt(self, "b_ref_mode", "disabled");
-		venc_set_av_opt_int(
-			self, "intra-refresh", !!self->attrs.use_intra_refresh);
-		break;
-	}
-	default:
-		break;
-	}
-
-	self->avcodec->width = base->config.input.info.resolution.width;
-	self->avcodec->height = base->config.input.info.resolution.height;
-	self->avcodec->time_base.num = self->avcodec->framerate.num =
-		base->config.input.info.framerate.num;
-	self->avcodec->time_base.den = self->avcodec->framerate.den =
-		base->config.input.info.framerate.den;
-	self->avcodec->max_b_frames = 0;
-	self->avcodec->gop_size = self->avcodec->keyint_min = self->attrs.gop;
-
-	switch (base->config.encoding) {
-	case VDEF_ENCODING_H264: {
-		self->avcodec->slices =
-			base->config.h264.slice_size_mbrows > 0
-				? (base->mb_height /
-				   base->config.h264.slice_size_mbrows)
-				: 0;
-		venc_set_av_opt(self, "coder", self->attrs.coder_str);
-		break;
-	}
-	case VDEF_ENCODING_H265:
-	default:
-		break;
-	}
-
-	venc_set_av_opt(self, self->attrs.rc_key_str, self->attrs.rc_val_str);
-
-	switch (self->attrs.rc) {
-	default:
-	case VENC_RATE_CONTROL_CBR:
-	case VENC_RATE_CONTROL_VBR:
-		self->avcodec->rc_max_rate = self->attrs.max_bitrate;
-		self->avcodec->bit_rate = self->attrs.target_bitrate;
-		break;
-	case VENC_RATE_CONTROL_CQ:
-		venc_set_av_opt_int(self, "qp", self->attrs.qp);
-		break;
-	}
-
-	if (self->attrs.min_qp != 0 || self->attrs.max_qp != 0) {
-		min_qp = FUTILS_MAX(min_qp, self->attrs.min_qp);
-		max_qp = FUTILS_MIN(max_qp, self->attrs.max_qp);
-	}
-
-	self->avcodec->qmin = min_qp;
-	self->avcodec->qmax = max_qp;
+	configure_avcodec(self);
 
 	self->dynconf = (struct venc_dyn_config){
 		.decimation = self->attrs.decimation,

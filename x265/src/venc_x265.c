@@ -66,6 +66,24 @@ static void call_stop_done(void *userdata)
 }
 
 
+static int ulog_level_to_x265(int level)
+{
+	switch (level) {
+	case ULOG_CRIT:
+	case ULOG_ERR:
+		return X265_LOG_ERROR;
+	case ULOG_WARN:
+		return X265_LOG_WARNING;
+	case ULOG_DEBUG:
+		return X265_LOG_DEBUG;
+	case ULOG_NOTICE:
+	case ULOG_INFO:
+	default:
+		return X265_LOG_INFO;
+	}
+}
+
+
 static void mbox_cb(int fd, uint32_t revents, void *userdata)
 {
 	struct venc_x265 *self = userdata;
@@ -1288,6 +1306,7 @@ static int create(struct venc_encoder *base)
 		base->config.h265.level = VENC_X265_LEVEL_5_1;
 
 	/* TODO */
+	x265_params->logLevel = ulog_level_to_x265(ULOG_GET_LEVEL());
 	x265_params->sourceWidth = base->config.input.info.resolution.width;
 	x265_params->sourceHeight = base->config.input.info.resolution.height;
 	x265_params->fpsNum = base->config.input.info.framerate.num;

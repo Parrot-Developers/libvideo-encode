@@ -96,8 +96,8 @@ static int get_supported_input_formats(enum vdef_encoding encoding,
 static int copy_implem_cfg(const struct venc_config_impl *impl_cfg,
 			   struct venc_config_impl **ret_obj)
 {
-	struct venc_config_mediacodec *specific =
-		(struct venc_config_mediacodec *)impl_cfg;
+	const struct venc_config_mediacodec *specific =
+		(const struct venc_config_mediacodec *)impl_cfg;
 	struct venc_config_mediacodec *copy = NULL;
 	ULOG_ERRNO_RETURN_ERR_IF(specific == NULL, EINVAL);
 	ULOG_ERRNO_RETURN_ERR_IF(ret_obj == NULL, EINVAL);

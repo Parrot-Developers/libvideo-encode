@@ -26,9 +26,10 @@
 
 #define ULOG_TAG venc
 #include <ulog.h>
-ULOG_DECLARE_TAG(venc);
 
 #include "venc_priv.h"
+
+ULOG_DECLARE_TAG(venc);
 
 
 /* Put preferred implementation first for autoselection */
@@ -298,9 +299,11 @@ enum venc_encoder_implem venc_get_auto_implem_by_encoding_and_format(
 			continue;
 
 		bool encoding_supported = false;
-		for (int j = 0; j < res && !encoding_supported; j++) {
-			if (encodings[j] == encoding)
+		for (int j = 0; j < res; j++) {
+			if (encodings[j] == encoding) {
 				encoding_supported = true;
+				break;
+			}
 		}
 
 		if (encoding_supported) {
